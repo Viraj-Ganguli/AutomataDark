@@ -1,6 +1,5 @@
-# factory-lab
+# AutomataDark
 
-A learning lab for an autonomous coding-agent workflow.
 
 This repo currently contains two things:
 
