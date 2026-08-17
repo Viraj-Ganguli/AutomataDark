@@ -75,6 +75,15 @@ web_modules/
 .factory/review-result.json
 .factory/review-score.json
 
+# Local session/state files some non-Claude-Code harnesses may drop in cwd
+# when run via .factory/scripts/run-agent.sh (opencode, codex). Auth/config
+# for those harnesses is written under $HOME, not here, but if a run leaves
+# stray state in the repo it must not trip the orchestrator's git-diff-based
+# path allowlists (orchestrator.yml qa/coder) or the review write-scope gate.
+.opencode/
+.codex/
+opencode.json.local
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

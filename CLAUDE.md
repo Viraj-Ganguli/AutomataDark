@@ -60,7 +60,10 @@ not via ad-hoc `res.status(...)` calls scattered through services.
 ### Orchestration
 
 `.github/workflows/orchestrator.yml` drives the QA → Coder → Review → PR
-pipeline described above, invoking Claude Code in CI per
+pipeline described above, invoking an agent CLI in CI per
 `.factory/qa.nlspec.md` / `.factory/coder.nlspec.md` / `.factory/rubric.json`.
-See the README's "Agent orchestrator" section for the trigger, configuration
+Each stage runs through `.factory/scripts/run-agent.sh`, which installs the
+configured harness (`claude-code`, `opencode`, or `codex`) and points it at
+OpenRouter, so the harness and model can differ per stage. See the README's
+"Agent orchestrator" section for the trigger, configuration
 (`.factory/orchestrator.config.json`), and one-time setup steps.

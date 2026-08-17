@@ -1,25 +1,39 @@
-# Spine test (Phase 0 proof) -- DELETE AFTER VALIDATION
+# Spine test -- harness/OpenRouter smoke test
 #
-# One-off, manually-triggered workflow that proves the CI "spine" the real
+# Manually-triggered workflow that proves the CI "spine" the real
 # orchestrator (.github/workflows/orchestrator.yml) depends on actually
-# works in this repo:
+# works in this repo, for a given harness/model combination:
 #   - a postgres service container the app can connect to
 #   - npm run install:all / npm run migrate / npm test
-#   - anthropics/claude-code-action@v1 editing a file and committing
+#   - .factory/scripts/run-agent.sh installing and running the chosen
+#     harness against OpenRouter, and editing a file
 #
-# Run it once via the Actions tab (workflow_dispatch), confirm:
+# Unlike the orchestrator, this workflow is meant to stay -- use it whenever
+# you add a new harness, change OPENROUTER_API_KEY, or want to sanity-check a
+# model slug before putting it in .factory/orchestrator.config.json. Dispatch
+# it via the Actions tab, picking a harness and (optionally) a model slug
+# native to that harness, then confirm:
 #   - the run is green
 #   - it pushed a commit to a new agent/spine-test-<run id> branch that adds
 #     a one-line comment to server/src/app.js
-#   - npm test ran (passes with "no tests found" -- that's expected, no test
-#     files exist yet)
-#
-# Then delete that branch and this file -- it is not part of the pipeline.
+#   - the OpenRouter activity dashboard (openrouter.ai/activity) shows a
+#     request that actually served the model you asked for -- this is the
+#     real proof that per-stage model selection works, not just that the run
+#     went green
 
-name: Spine Test (delete after validation)
+name: Spine Test
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: "Harness to smoke-test: claude-code, opencode, or codex. Leave empty to use .factory/orchestrator.config.json's default."
+        required: false
+        type: string
+      model:
+        description: "OpenRouter model slug native to the chosen harness (e.g. ~anthropic/claude-sonnet-latest, openai/gpt-5.3-codex). Leave empty to use the config default."
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -78,38 +92,22 @@ jobs:
       - name: Run migrations
         run: npm run migrate
 
-      - name: Resolve model
-        id: model
-        run: echo "model=$(jq -r '.model' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
-
       - name: Assemble prompt
-        id: prompt
         run: |
-          set -euo pipefail
           cat > /tmp/spine-prompt.md <<'EOF'
           Add a single-line comment to the top of `server/src/app.js` (just
           below any existing top-of-file comments) describing what the
           module exports. Do not change anything else -- no other files, no
           other lines.
           EOF
-          DELIM="PROMPT_EOF_$(cat /proc/sys/kernel/random/uuid)"
-          {
-            echo "prompt<<$DELIM"
-            cat /tmp/spine-prompt.md
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
 
-      - name: Run Claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt: ${{ steps.prompt.outputs.prompt }}
-          claude_args: >-
-            --model ${{ steps.model.outputs.model }}
-            --max-turns 5
-            --allowedTools "Read,Write,Edit,Bash(npm test*)"
-            --permission-mode acceptEdits
+      - name: Run agent
+        timeout-minutes: 10
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STAGE_OVERRIDE_HARNESS: ${{ inputs.harness }}
+          STAGE_OVERRIDE_MODEL: ${{ inputs.model }}
+        run: bash .factory/scripts/run-agent.sh spine /tmp/spine-prompt.md "Read,Write,Edit,Bash(npm test*)"
 
       - name: Show diff
         run: |
@@ -125,9 +123,9 @@ jobs:
         run: |
           set -euo pipefail
           if git diff --cached --quiet; then
-            echo "Claude made no changes -- nothing to commit. Spine still considered green if the steps above succeeded."
+            echo "Agent made no changes -- nothing to commit. Spine still considered green if the steps above succeeded."
             exit 0
           fi
-          git commit -m "chore: spine test -- Claude edit + green CI"
+          git commit -m "chore: spine test -- agent edit + green CI"
           git push -u origin "$BRANCH"
-          echo "Pushed to branch $BRANCH -- delete it (and this workflow file) after confirming this run."
+          echo "Pushed to branch $BRANCH -- delete it once you've confirmed this run in the OpenRouter dashboard."

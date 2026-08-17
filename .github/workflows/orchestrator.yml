@@ -7,10 +7,12 @@
 # .factory/orchestrator.config.json, default "build") to an NLSpec issue, or a
 # maintainer manually dispatches this workflow for a given issue number.
 #
-# Tuning (model, max-turns, autoMerge, the trigger label) lives in
-# .factory/orchestrator.config.json, not in this file. See README.md for the
-# one-time setup (ANTHROPIC_API_KEY secret, the "build" label, workflow
-# permissions) and how to trigger/configure a run.
+# Tuning (harness, model, max-turns, autoMerge, the trigger label) lives in
+# .factory/orchestrator.config.json, not in this file. Every stage runs
+# through .factory/scripts/run-agent.sh, which installs the configured
+# harness (claude-code, opencode, or codex) and points it at OpenRouter. See
+# README.md for the one-time setup (OPENROUTER_API_KEY secret, the "build"
+# label, workflow permissions) and how to trigger/configure a run.
 
 name: Agent Orchestrator
 
@@ -24,7 +26,11 @@ on:
         required: true
         type: number
       model:
-        description: "Override the Claude model for every stage of this run (e.g. claude-opus-4-8). Leave empty to use .factory/orchestrator.config.json."
+        description: "Override the OpenRouter model slug for every stage of this run (e.g. ~anthropic/claude-opus-latest). Leave empty to use .factory/orchestrator.config.json."
+        required: false
+        type: string
+      harness:
+        description: "Override the harness for every stage of this run: claude-code, opencode, or codex. Leave empty to use .factory/orchestrator.config.json."
         required: false
         type: string
 
@@ -51,6 +57,7 @@ jobs:
       proceed: ${{ steps.check.outputs.proceed }}
       issue_number: ${{ steps.check.outputs.issue_number }}
       model_override: ${{ steps.check.outputs.model_override }}
+      harness_override: ${{ steps.check.outputs.harness_override }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,6 +72,7 @@ jobs:
           EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
           DISPATCH_ISSUE_NUMBER: ${{ inputs.issue_number }}
           DISPATCH_MODEL: ${{ inputs.model }}
+          DISPATCH_HARNESS: ${{ inputs.harness }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -76,6 +84,7 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "issue_number=$DISPATCH_ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
             echo "model_override=$DISPATCH_MODEL" >> "$GITHUB_OUTPUT"
+            echo "harness_override=$DISPATCH_HARNESS" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -90,6 +99,7 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "issue_number=$EVENT_ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
             echo "model_override=" >> "$GITHUB_OUTPUT"
+            echo "harness_override=" >> "$GITHUB_OUTPUT"
           else
             echo "$EVENT_SENDER is not a collaborator; skipping."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
@@ -195,33 +205,13 @@ jobs:
       - name: Run migrations
         run: npm run migrate
 
-      - name: Resolve model
-        id: model
-        env:
-          OVERRIDE: ${{ needs.guard.outputs.model_override }}
-        run: |
-          set -euo pipefail
-          if [ -n "$OVERRIDE" ]; then
-            MODEL="$OVERRIDE"
-          else
-            MODEL=$(jq -r '.stageModels.qa // .model' .factory/orchestrator.config.json)
-          fi
-          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve max turns
-        id: turns
-        run: echo "max_turns=$(jq -r '.qaMaxTurns' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
-
       - name: Assemble QA prompt
-        id: prompt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
-          DELIM="PROMPT_EOF_$(cat /proc/sys/kernel/random/uuid)"
           {
-            echo "prompt<<$DELIM"
             cat .factory/qa.nlspec.md
             echo
             echo "---"
@@ -242,21 +232,17 @@ jobs:
             echo "Use your Write or Edit tools to create test file(s) under \`tests/<feature>/\`."
             echo "Do NOT describe what you will do — call the tools and write the files."
             echo "When done, run \`npm test\` to confirm the new tests fail for the right reason."
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
+          } > /tmp/qa-prompt.md
 
       - name: Run QA agent
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          show_full_output: "true"
-          prompt: ${{ steps.prompt.outputs.prompt }}
-          claude_args: >-
-            --model ${{ steps.model.outputs.model }}
-            --max-turns ${{ steps.turns.outputs.max_turns }}
-            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
-            --permission-mode acceptEdits
+        timeout-minutes: 20
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
+          STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
+        run: >-
+          bash .factory/scripts/run-agent.sh qa /tmp/qa-prompt.md
+          "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
 
       - name: Stage QA agent changes
         run: git add -A
@@ -359,33 +345,13 @@ jobs:
       - name: Run migrations
         run: npm run migrate
 
-      - name: Resolve model
-        id: model
-        env:
-          OVERRIDE: ${{ needs.guard.outputs.model_override }}
-        run: |
-          set -euo pipefail
-          if [ -n "$OVERRIDE" ]; then
-            MODEL="$OVERRIDE"
-          else
-            MODEL=$(jq -r '.stageModels.coder // .model' .factory/orchestrator.config.json)
-          fi
-          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve max turns
-        id: turns
-        run: echo "max_turns=$(jq -r '.coderMaxTurns' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
-
       - name: Assemble coder prompt
-        id: prompt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
-          DELIM="PROMPT_EOF_$(cat /proc/sys/kernel/random/uuid)"
           {
-            echo "prompt<<$DELIM"
             cat .factory/coder.nlspec.md
             echo
             echo "---"
@@ -406,21 +372,17 @@ jobs:
             echo
             echo "Start now: run \`npm test\`, read the failures, edit the application source, and repeat until green."
             echo "Do NOT describe what you will do — call the tools and fix the code."
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
+          } > /tmp/coder-prompt.md
 
       - name: Run coder agent
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          show_full_output: "true"
-          prompt: ${{ steps.prompt.outputs.prompt }}
-          claude_args: >-
-            --model ${{ steps.model.outputs.model }}
-            --max-turns ${{ steps.turns.outputs.max_turns }}
-            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
-            --permission-mode acceptEdits
+        timeout-minutes: 25
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
+          STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
+        run: >-
+          bash .factory/scripts/run-agent.sh coder /tmp/coder-prompt.md
+          "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
 
       - name: Stage coder agent changes
         run: git add -A
@@ -541,25 +503,7 @@ jobs:
             esac
           done < /tmp/changed-files.txt
 
-      - name: Resolve model
-        id: model
-        env:
-          OVERRIDE: ${{ needs.guard.outputs.model_override }}
-        run: |
-          set -euo pipefail
-          if [ -n "$OVERRIDE" ]; then
-            MODEL="$OVERRIDE"
-          else
-            MODEL=$(jq -r '.stageModels.review // .model' .factory/orchestrator.config.json)
-          fi
-          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve max turns
-        id: turns
-        run: echo "max_turns=$(jq -r '.reviewMaxTurns' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
-
       - name: Assemble review prompt
-        id: prompt
         env:
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
@@ -613,25 +557,15 @@ jobs:
             echo '```'
           } > /tmp/review-prompt.md
 
-          DELIM="PROMPT_EOF_$(cat /proc/sys/kernel/random/uuid)"
-          {
-            echo "prompt<<$DELIM"
-            cat /tmp/review-prompt.md
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Run review agent
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          show_full_output: "true"
-          prompt: ${{ steps.prompt.outputs.prompt }}
-          claude_args: >-
-            --model ${{ steps.model.outputs.model }}
-            --max-turns ${{ steps.turns.outputs.max_turns }}
-            --allowedTools "Read,Write,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(npm test*)"
-            --permission-mode acceptEdits
+        timeout-minutes: 15
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
+          STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
+        run: >-
+          bash .factory/scripts/run-agent.sh review /tmp/review-prompt.md
+          "Read,Write,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(npm test*)"
 
       - name: Enforce review write-scope
         run: |

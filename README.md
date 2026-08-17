@@ -98,16 +98,21 @@ which fails the run if `tests/golden/**` appears in the diff vs `main`.
 
 ```
 issue labeled "build" (by a collaborator)
-  or workflow_dispatch (issue_number, optional model override)
+  or workflow_dispatch (issue_number, optional model/harness override)
         │
         ▼
   guard ──▶ setup ──▶ qa ──▶ coder ──▶ review ──▶ pr
         (any failure) ──▶ report-failure (comments on the issue)
 ```
 
+Every stage's agent call goes through `.factory/scripts/run-agent.sh`, which
+installs the configured harness — `claude-code`, `opencode`, or `codex` — and
+points it at [OpenRouter](https://openrouter.ai) so any OpenRouter model can
+run any stage. See [Model selection](#model-selection--harnesses) below.
+
 - **guard** — for label events, checks the label matches the configured
   trigger label and the user who applied it is a repo collaborator (so
-  outside actors can't spend the API key or push code). For
+  outside actors can't spend the OpenRouter key or push code). For
   `workflow_dispatch`, always proceeds for the given `issue_number`.
 - **setup** — creates (or reuses) branch `agent/issue-<n>-<slug>` and posts a
   "build started" comment on the issue.
@@ -136,8 +141,8 @@ issue labeled "build" (by a collaborator)
 - **Normal use**: as a repo collaborator, apply the configured label (default
   `build`) to an NLSpec issue.
 - **Manual / one-off**: Actions tab → "Agent Orchestrator" → *Run workflow* →
-  provide `issue_number` and (optionally) a `model` override for that single
-  run.
+  provide `issue_number` and (optionally) `model` and/or `harness` overrides
+  for that single run.
 
 ### Configuration (`.factory/orchestrator.config.json`)
 
@@ -148,86 +153,96 @@ file is a safe place for orchestrator-only tuning:
 | --- | --- |
 | `label` | Issue label that triggers a run (default `"build"`). |
 | `autoMerge` | If `true`, the `pr` job squash-merges automatically when the rubric passes. Default `false` (human-gated). |
-| `qaMaxTurns` / `coderMaxTurns` / `reviewMaxTurns` | `--max-turns` passed to each stage's Claude invocation. |
-| `model` | Default Claude model id for every stage (e.g. `claude-sonnet-4-6`). |
-| `stageModels` | Optional per-stage overrides, e.g. `{"coder": "claude-opus-4-8"}`. Stages not listed fall back to `model`. |
+| `harness` | Default agent CLI for every stage: `claude-code`, `opencode`, or `codex`. |
+| `model` | Default OpenRouter model slug for every stage (e.g. `~anthropic/claude-sonnet-latest`). |
+| `maxTurns` | Default `--max-turns` per stage. Honored by the `claude-code` harness only — `opencode` and `codex` have no turn cap, so each agent step also carries a `timeout-minutes` backstop. |
+| `stages.<qa\|coder\|review>` | Optional per-stage `{ "harness", "model", "maxTurns" }` overrides. Any key not set for a stage falls back to the top-level default above. |
 
-**Plug-and-play models**: every stage's `--model` comes from this config (or
-the `workflow_dispatch` `model` input). The workflow never hardcodes or
-validates against a fixed model list — any valid Claude model id works with
-no edits to the YAML.
+**Plug-and-play models and harnesses**: every stage's harness/model comes
+from this config (or the `workflow_dispatch` `model`/`harness` inputs). The
+workflow never hardcodes or validates against a fixed list — any OpenRouter
+model slug, on any of the three harnesses, works with no edits to the YAML.
 
-### Model selection & rate limits
+### Model selection & harnesses
 
-`anthropics/claude-code-action@v1` makes internal Haiku API calls (~3K
-tokens/invocation) to drive its own tooling. These count against the same
-"Claude Haiku Active" rate-limit bucket as your main model calls. On a
-new/low-spend Anthropic account the hard limit is **10K input tokens/minute**
-per model family. Using Haiku as the `model` in config means both the
-action's internal calls and your 9K-token prompts compete for that same 10K
-bucket — practically guaranteed 429s before Claude touches a file.
+Every stage authenticates to [OpenRouter](https://openrouter.ai) with a
+single `OPENROUTER_API_KEY`, so one key and one credit balance covers every
+provider. `.factory/scripts/run-agent.sh` installs whichever harness a stage
+is configured for and points it at OpenRouter:
 
-**Recommendation: use `claude-sonnet-4-6` as `model` on any new account.**
-Sonnet calls go into the "Claude Sonnet Active" bucket; the action's internal
-Haiku calls stay in the "Claude Haiku Active" bucket. Both stay under 10K/min
-independently.
+| Harness | Best for | Model slug format |
+| --- | --- | --- |
+| `claude-code` | Anthropic models — this is the harness the CLI is built around, and the one to reach for by default. | `~anthropic/claude-sonnet-latest`, `~anthropic/claude-opus-latest`, or a pinned id like `anthropic/claude-sonnet-4-6` |
+| `opencode` | Any OpenRouter model, including non-Anthropic ones — general-purpose adapter with first-class multi-provider support. | `openai/gpt-5.3-codex`, `google/gemini-flash-latest`, `deepseek/deepseek-v4`, etc. (no `~` prefix; passed as `openrouter/<slug>`) |
+| `codex` | OpenAI models specifically, when you want Codex's own tool-use behavior rather than a generic adapter. | `openai/gpt-5.3-codex`, `~openai/gpt-latest` |
 
-| Model | Works on new account | Approx. cost/run | Notes |
-| --- | --- | --- | --- |
-| `claude-sonnet-4-6` | ✅ yes | ~$0.05–0.35 | **Recommended default.** Fast, capable, separate rate bucket from action internals. |
-| `claude-opus-4-8` | ✅ yes | ~$0.50–2.00 | Best quality; use `stageModels` to apply only to the coder stage. |
-| `claude-haiku-4-5-20251001` | ⚠️ only if TPM ≥ 20K | ~$0.01–0.05 | Cheapest, but action's own Haiku overhead + your prompt exceeds the default 10K/min limit. |
+OpenRouter's own docs note that Claude Code "is optimized for Anthropic
+models and may not work correctly with other providers" — so for a
+non-Anthropic slug, prefer the `opencode` or `codex` harness over forcing it
+through `claude-code`.
 
-Cost per run is proportional to `coderMaxTurns` — that is the most token-heavy
-stage because it loops `npm test` → read → edit multiple times. Reducing
-`coderMaxTurns` from 8 to 5–6 is the single biggest cost lever.
+Use `.factory/scripts/run-agent.sh` via `.github/workflows/spine-test.yml`
+(see setup step 4 below) to confirm a harness/model combination actually
+works, and check [openrouter.ai/activity](https://openrouter.ai/activity)
+afterward — it shows which model actually served each request and its cost,
+which is the real confirmation that a slug resolved correctly.
 
-To use Haiku (or any model at lower cost) reliably, request a rate limit
-increase at [console.anthropic.com/settings/limits](https://console.anthropic.com/settings/limits).
-A Haiku limit of ≥ 20K input TPM is sufficient to clear the overhead.
-
-**Per-stage override example** — heavy model for coding, light model for QA
-and review:
+**Per-stage example** — a strong model on the coder stage, a cheap one for QA
+and review, mixing providers via `opencode`:
 
 ```json
 {
-  "model": "claude-haiku-4-5-20251001",
-  "stageModels": {
-    "coder": "claude-sonnet-4-6"
+  "harness": "opencode",
+  "model": "google/gemini-flash-latest",
+  "stages": {
+    "coder": { "harness": "codex", "model": "openai/gpt-5.3-codex" }
   }
 }
 ```
 
-**One-off model override** — no config edit needed; use the `workflow_dispatch`
-`model` input in the Actions tab to try a different model on a single run.
+Cost per run is proportional to `maxTurns` (`claude-code`) — the coder stage
+is the most token-heavy since it loops `npm test` → read → edit multiple
+times. Reducing it from 8 to 5–6 is the single biggest cost lever there; for
+`opencode`/`codex`, `timeout-minutes` on the agent step is the equivalent
+lever.
+
+**One-off override** — no config edit needed; use the `workflow_dispatch`
+`model` and/or `harness` inputs in the Actions tab to try a different
+combination on a single run.
 
 ### One-time setup
 
-1. Add the `ANTHROPIC_API_KEY` repo secret: `gh secret set ANTHROPIC_API_KEY`.
+1. Add the `OPENROUTER_API_KEY` repo secret: `gh secret set OPENROUTER_API_KEY`
+   (get a key at [openrouter.ai/keys](https://openrouter.ai/keys)).
 2. Create the trigger label (default `build`): `gh label create build`.
 3. Settings → Actions → General → Workflow permissions: enable "Read and
    write permissions" and "Allow GitHub Actions to create and approve pull
    requests" (the `setup`/`qa`/`coder` jobs push commits and the `pr` job
    opens PRs).
-4. **Validate the spine first**: manually dispatch
-   `.github/workflows/spine-test.yml` once. It spins up the same Postgres
-   service container, installs/migrates, has Claude make a one-line edit, and
-   runs `npm test`. Confirm it's green and pushes a commit to a scratch
-   `agent/spine-test-<run id>` branch, then delete that branch and the
-   workflow file. This is a `workflow_dispatch`-only check — the first real
-   orchestrator run via issue label exercises a different (issue-event) code
-   path in `claude-code-action`, so treat that first labeled run as a
-   confirm-on-first-use step too.
+4. **Validate the spine**: manually dispatch
+   `.github/workflows/spine-test.yml`, optionally passing `harness`/`model`
+   inputs. It spins up the same Postgres service container, installs/
+   migrates, has the agent make a one-line edit, and runs `npm test`.
+   Confirm it's green, pushes a commit to a scratch
+   `agent/spine-test-<run id>` branch, and — cross-checking
+   [openrouter.ai/activity](https://openrouter.ai/activity) — that the model
+   which actually served the request matches what you configured. Unlike the
+   old Anthropic-only version of this file, it's meant to stay: dispatch it
+   again whenever you add a harness or want to sanity-check a new model slug
+   before putting it in `.factory/orchestrator.config.json`.
 5. File an NLSpec issue (`.github/ISSUE_TEMPLATE/nlspec.md`) and apply the
    `build` label as a collaborator, or use `workflow_dispatch` as above.
 
 ### Known limits
 
-- The `review` job's prompt (including the full diff vs `main`) is passed
-  through a `$GITHUB_OUTPUT` heredoc, which has a ~1 MB ceiling. Fine at this
-  lab's scale; very large diffs could exceed it.
+- `maxTurns` only bounds the `claude-code` harness. `opencode` and `codex`
+  have no CLI-level turn cap, so `timeout-minutes` on each agent step is the
+  real backstop for those two — tune it if a stage needs longer runs.
 - Each stage runs against a fresh Postgres service container with migrations
   applied — no seed data persists between jobs beyond what's in the repo.
+- Job logs now show raw agent stdout instead of a formatted action report —
+  noisier, but it's the actual tool-call trace, which is useful when a stage
+  fails.
 
 ## Factory scaffolding (`.factory/`, issue & PR templates)
 
@@ -278,7 +293,7 @@ rm -rf /tmp/factory-lab-src
 | Layer | Keep as-is | Replace / adapt |
 | --- | --- | --- |
 | `.github/workflows/orchestrator.yml` | ✅ keep | Only edit if your test command differs from `npm test` — change the two `npm test` invocations and the `npm run install:all` / `npm run migrate` setup steps. |
-| `.factory/orchestrator.config.json` | ✅ keep | Update `model`, `autoMerge`, turn limits to taste. |
+| `.factory/orchestrator.config.json` | ✅ keep | Update `harness`, `model`, `autoMerge`, `maxTurns`/`stages` to taste. |
 | `.factory/qa.nlspec.md` | ✅ keep structure | Update the **Allowed paths** / **Forbidden paths** sections for your repo layout, and the test-layer guidance (Supertest, pytest, etc.) for your stack. |
 | `.factory/coder.nlspec.md` | ✅ keep structure | Update **Allowed paths** and the step-3 layering bullet points (`routes→services→data-access` etc.) to match your app's architecture. |
 | `.factory/rubric.json` | ✅ keep | Adjust criterion weights/descriptions to match your quality bar. |
@@ -310,7 +325,7 @@ After copying the factory files into your project:
   `npm run install:all` / `npm run migrate` lines and replace them. The
   Postgres service container block can be removed entirely for non-Postgres
   projects.
-- [ ] **One-time setup** (same as factory-lab's): add `ANTHROPIC_API_KEY`
+- [ ] **One-time setup** (same as factory-lab's): add `OPENROUTER_API_KEY`
   secret, create the `build` label, enable read/write workflow permissions.
 
 ### Non-Node stacks
