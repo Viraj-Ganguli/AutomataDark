@@ -254,19 +254,19 @@ instead of guessing. See the root `CLAUDE.md` for the full authority rules.
 
 ---
 
-## Adapting factory-lab for your own project
+## Adapting AutomataDark for your own project
 
 The pipeline (orchestrator workflow, agent NLSpecs, rubric, issue/PR
 templates) is fully portable. The app (`client/`, `server/`, `tests/golden/`,
-`CLAUDE.md`) is factory-lab-specific and gets replaced with your own project.
+`CLAUDE.md`) is AutomataDark-specific and gets replaced with your own project.
 
 ### Quickest path — GitHub template
 
-factory-lab is configured as a GitHub Template Repository. Create a new repo
+AutomataDark is configured as a GitHub Template Repository. Create a new repo
 from it in one command:
 
 ```bash
-gh repo create my-project --template virajganguli/factory-lab --private
+gh repo create my-project --template virajganguli/AutomataDark --private
 cd my-project
 ```
 
@@ -277,15 +277,15 @@ Alternatively, copy only the factory layer into an existing repo:
 
 ```bash
 # Run from inside your existing project repo
-FACTORY=https://github.com/virajganguli/factory-lab
+FACTORY=https://github.com/virajganguli/AutomataDark
 
 # Copy the portable factory files
-gh repo clone virajganguli/factory-lab /tmp/factory-lab-src
-cp -r /tmp/factory-lab-src/.factory              .
-cp -r /tmp/factory-lab-src/.github/workflows/orchestrator.yml  .github/workflows/
-cp -r /tmp/factory-lab-src/.github/ISSUE_TEMPLATE .github/
-cp -r /tmp/factory-lab-src/.github/PULL_REQUEST_TEMPLATE .github/
-rm -rf /tmp/factory-lab-src
+gh repo clone virajganguli/AutomataDark /tmp/AutomataDark-src
+cp -r /tmp/AutomataDark-src/.factory              .
+cp -r /tmp/AutomataDark-src/.github/workflows/orchestrator.yml  .github/workflows/
+cp -r /tmp/AutomataDark-src/.github/ISSUE_TEMPLATE .github/
+cp -r /tmp/AutomataDark-src/.github/PULL_REQUEST_TEMPLATE .github/
+rm -rf /tmp/AutomataDark-src
 ```
 
 ### What to keep vs. what to replace
@@ -325,7 +325,7 @@ After copying the factory files into your project:
   `npm run install:all` / `npm run migrate` lines and replace them. The
   Postgres service container block can be removed entirely for non-Postgres
   projects.
-- [ ] **One-time setup** (same as factory-lab's): add `OPENROUTER_API_KEY`
+- [ ] **One-time setup** (same as AutomataDark's): add `OPENROUTER_API_KEY`
   secret, create the `build` label, enable read/write workflow permissions.
 
 ### Non-Node stacks
@@ -333,7 +333,7 @@ After copying the factory files into your project:
 The orchestrator is language-agnostic — it just runs shell commands in a
 Linux runner. Typical substitutions:
 
-| factory-lab (Node/Express/Postgres) | Python/FastAPI/Postgres | Ruby/Rails |
+| AutomataDark (Node/Express/Postgres) | Python/FastAPI/Postgres | Ruby/Rails |
 | --- | --- | --- |
 | `npm run install:all` | `pip install -r requirements.txt` | `bundle install` |
 | `npm run migrate` | `alembic upgrade head` | `rails db:migrate` |
