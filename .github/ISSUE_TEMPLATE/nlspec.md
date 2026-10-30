@@ -10,8 +10,8 @@ DRAFT — starter content, revise me.
 
 This issue body is read directly by the QA agent (.factory/qa.nlspec.md) and
 the coder agent (.factory/coder.nlspec.md). Fill out every section. Be
-specific and unambiguous — vague sections become entries in
-.factory/ambiguity-checklist.md instead of working code.
+specific and unambiguous — vague sections come back as open questions in
+the PR (via .factory/ambiguity-checklist.md) instead of working code.
 
 Do not delete sections, even if "N/A" — an empty/missing section is treated
 as undefined, not "no constraint".

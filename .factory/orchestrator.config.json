@@ -1,25 +1,55 @@
 {
-  "_comment": "Config for .github/workflows/orchestrator.yml, read by .factory/scripts/run-agent.sh. Human-maintained — agents (per coder.nlspec.md / qa.nlspec.md) are forbidden from editing .factory/**, so this file is a safe place for orchestrator-only tuning.",
-
+  "_comment": "Config for .github/workflows/orchestrator.yml, read by .factory/scripts/run-agent.sh. Human-maintained -- agents are forbidden from editing .factory/** (except ambiguity-checklist.md), so this file is a safe place for orchestrator-only tuning. Check what each stage resolves to with: .factory/factory.sh config",
   "label": "build",
-
   "autoMerge": false,
 
-  "_modelComment": "Every agent call goes through OpenRouter (see README's 'Model selection' section). 'harness' selects which CLI runs the stage: claude-code, opencode, or codex. 'model' is an OpenRouter slug, e.g. '~anthropic/claude-sonnet-latest' or 'openai/gpt-5.3-codex'. 'maxTurns' is honored by claude-code only -- the job's timeout-minutes is the universal cap. These three are top-level defaults; override any of them per stage in 'stages' below. Resolution order per stage/key: workflow_dispatch override > stages.<stage>.<key> > the top-level default here.",
-
+  "_modelComment": "harness: claude-code | opencode | codex. model: any OpenRouter slug from https://openrouter.ai/models (e.g. '~anthropic/claude-sonnet-latest', '~google/gemini-flash-latest', 'openai/gpt-5.3-codex'). maxTurns: honored by claude-code only. maxAttempts: how many times a stage is re-run with the failing test output fed back (used by coder). Any key can be overridden per stage under 'stages'. Resolution order: workflow_dispatch override > stages.<stage>.<key> > top-level default.",
   "harness": "claude-code",
   "model": "~anthropic/claude-sonnet-latest",
   "maxTurns": 6,
-
   "stages": {
     "qa": {
       "maxTurns": 5
     },
     "coder": {
-      "maxTurns": 6
+      "maxTurns": 6,
+      "maxAttempts": 2
     },
     "review": {
       "maxTurns": 4
     }
-  }
+  },
+
+  "_productComment": "The product's own commands -- the only place the factory touches its stack (language, package manager, test runner). Run by .factory/scripts/product.sh with the factory's key material removed from the environment. setup: install toolchain + dependencies, start services (e.g. 'docker compose up -d'), migrate; runs before every agent stage. test: the suite; its exit status is the verdict. Keep it one command with no commas (it also becomes the agents' shell permission, e.g. Bash(pytest*)). testReport: the same suite, writing a JUnit XML report to $FACTORY_JUNIT, read by `factory red` (strictRedCheck). Test cases need a file attribute: pytest -o junit_family=xunit1, jest-junit JEST_JUNIT_ADD_FILE_ATTRIBUTE=true, gotestsum --junitfile, cargo nextest's JUnit output. env: extra environment variables for every product command. See README 'Plug in your product' for per-language examples.",
+  "product": {
+    "setup": "",
+    "test": "",
+    "testReport": "",
+    "env": {}
+  },
+
+  "_pathsComment": "The factory/product boundary, decided by `factory paths` (the proved Lean gate, .factory/lean/Factory/PathGate.lean) via .factory/scripts/check-paths.sh after every agent stage and injected into each agent's prompt. Plain path prefixes, each ending in '/' (the gate refuses others). 'protected' wins over everything; any path not listed for a stage is off-limits to it, which includes the factory itself (.factory/, .github/).",
+  "paths": {
+    "protected": [
+      "tests/golden/"
+    ],
+    "qa": [
+      "tests/"
+    ],
+    "coder": [
+      "src/"
+    ]
+  },
+
+  "_runKeyComment": "Every build gets its own throwaway OpenRouter key, minted from your management key and deleted when the build ends. limitUsd caps what one build can spend (and what a leaked run key is worth); ttlMinutes is a backstop expiry in case deletion fails. The workflow clamps these to at most $50 / 360 min no matter what this file says.",
+  "runKey": {
+    "limitUsd": 5,
+    "ttlMinutes": 180
+  },
+
+  "_qaComment": "strictRedCheck: when true, the QA job runs product.testReport and fails unless `factory red` accepts the JUnit report: some test in a file QA changed fails on an assertion, nothing errors at load/setup time, and no test outside QA's files fails. Works with any runner that writes JUnit XML. Set false to accept any red suite.",
+  "strictRedCheck": true,
+
+  "_versionsComment": "Optional npm version pins per harness for reproducible runs, e.g. {\"claude-code\": \"2.1.0\"}. Unlisted harnesses install @latest.",
+  "harnessVersions": {}
 }

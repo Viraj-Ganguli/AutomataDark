@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="1" tests="3" time="0.011" timestamp="2026-10-30T14:00:29.860309-05:00" hostname="ci"><testcase classname="tests.test_new" name="test_red" time="0.000"><failure message="assert 1 == 2">def test_red():
+&gt;       assert 1 == 2
+E       assert 1 == 2
+
+tests/test_new.py:3: AssertionError</failure></testcase><testcase classname="tests.test_new" name="test_skip" time="0.000"><skipped type="pytest.skip" message="unconditional skip">/work/tests/test_new.py:4: unconditional skip</skipped></testcase><testcase classname="tests.test_ok" name="test_passes" time="0.000" /></testsuite></testsuites>

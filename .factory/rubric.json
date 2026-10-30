@@ -15,15 +15,15 @@
       "criteria": [
         {
           "id": "security.authz",
-          "description": "Admin-only operations (create/update/delete events) are enforced server-side via requireAdmin, not just hidden in the UI."
+          "description": "Privileged operations are authorized server-side (or at the trust boundary), not just hidden in the UI or client."
         },
         {
           "id": "security.input-validation",
-          "description": "All user-supplied input is validated and/or parameterized before use; no raw string interpolation into SQL."
+          "description": "All external input is validated, and queries/commands are parameterized; no raw string interpolation into SQL, shell, or similar interpreters."
         },
         {
           "id": "security.session-handling",
-          "description": "Session/auth state is not leaked (e.g. password hashes never returned in API responses; cookies are httpOnly)."
+          "description": "Secrets and session/auth state are not leaked (e.g. password hashes or tokens never returned in responses or logs; cookies are httpOnly where applicable)."
         },
         {
           "id": "security.dependency-risk",
@@ -38,7 +38,7 @@
       "criteria": [
         {
           "id": "architecture.layering",
-          "description": "Changes respect routes -> services -> data-access layering: routes contain no SQL or business rules, services contain no req/res, data-access contains only SQL."
+          "description": "Changes respect the product's existing architecture and layering (as described in its agent docs, e.g. CLAUDE.md/AGENTS.md); no layer takes on another's responsibilities."
         },
         {
           "id": "architecture.scope",
@@ -46,11 +46,15 @@
         },
         {
           "id": "architecture.test-isolation",
-          "description": "Application code changes do not modify or weaken tests/**, especially tests/golden/."
+          "description": "Application code changes do not modify or weaken the tests, the protected harness, or how tests are run or discovered (test scripts, runner config)."
+        },
+        {
+          "id": "architecture.no-test-gaming",
+          "description": "The implementation delivers the behavior the issue describes, not just what the tests check: no hardcoded expected values, no branches on test-specific inputs or environment, no stubs that only exist to make a test pass."
         },
         {
           "id": "architecture.error-handling",
-          "description": "Errors use the existing error/middleware conventions (e.g. AppError subclasses, central error handler) rather than ad-hoc try/catch with inconsistent responses."
+          "description": "Errors follow the product's existing error-handling conventions rather than ad-hoc handling with inconsistent responses."
         }
       ]
     },
@@ -69,7 +73,7 @@
         },
         {
           "id": "style.test-tagging",
-          "description": "New tests follow the // AC-n tagging convention from .factory/qa.nlspec.md and live under the expected tests/ structure."
+          "description": "New tests follow the AC-n tagging convention from .factory/qa.nlspec.md and live inside the QA write scope."
         }
       ]
     }
