@@ -1,0 +1,36 @@
+# Factory verify: the gates are proved, and the code around them agrees.
+#
+#   lake build      checks every theorem in .factory/lean and runs the
+#                   build-time tests (real pytest/jest-junit reports)
+#   check-rubric    rubric.json is the rubric the theorems are about
+#   workflow        orchestrator.yml matches the Pipeline model
+#   diff-gate.sh    check-paths.sh's git plumbing agrees with the model
+#   gates.test.sh   end-to-end tests through the shipped entry points
+#
+# Same as `.factory/factory.sh verify` locally. See .factory/lean/README.md.
+
+name: Factory verify
+
+on:
+  push:
+    branches: [main]
+    paths: [".factory/**", ".github/**"]
+  pull_request:
+    paths: [".factory/**", ".github/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build factory gates
+        uses: ./.github/actions/factory-bin
+
+      - name: Prove and test
+        run: bash .factory/lean/scripts/run-all.sh

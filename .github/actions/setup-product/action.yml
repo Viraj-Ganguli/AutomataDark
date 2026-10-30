@@ -1,0 +1,26 @@
+# Get the product ready to test, for every orchestrator and spine job.
+#
+# Stack-agnostic: everything product-specific (toolchain, dependencies,
+# services such as a database, migrations, env vars) comes from the "product"
+# block of .factory/orchestrator.config.json, run by
+# .factory/scripts/product.sh. Agent jobs pass the snapshot copy of the
+# scripts, so an agent can't change what runs here.
+name: Set up product
+description: Export product.env, then run product.setup from the factory config.
+
+inputs:
+  scripts:
+    description: Directory holding product.sh (the job's factory snapshot).
+    required: false
+    default: .factory/scripts
+
+runs:
+  using: composite
+  steps:
+    - name: Export product env
+      shell: bash
+      run: bash "${{ inputs.scripts }}/product.sh" env >> "$GITHUB_ENV"
+
+    - name: Run product setup
+      shell: bash
+      run: bash "${{ inputs.scripts }}/product.sh" setup

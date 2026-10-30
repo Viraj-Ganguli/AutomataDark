@@ -19,10 +19,13 @@ Follow-up issue(s) (if any): #
 
 ## Tests
 
-- [ ] New/updated tests live under `tests/**` and follow the `// AC-n`
-      tagging convention from `.factory/qa.nlspec.md`.
-- [ ] `tests/golden/**` was **not** modified by this PR.
-- [ ] `npm test` passes locally / in CI, including the new tests.
+- [ ] New/updated tests live inside the QA write scope (`.paths.qa`) and
+      follow the `AC-n` tagging convention from `.factory/qa.nlspec.md`.
+- [ ] The protected paths (`.paths.protected`, e.g. the shared test harness)
+      were **not** modified by this PR.
+- [ ] The test command (`product.test`) passes locally / in CI, including the
+      new tests, and the test setup itself (scripts, runner config) wasn't
+      changed to get there.
 - [ ] Every Acceptance Criterion in the linked issue maps to at least one
       test.
 
@@ -38,14 +41,14 @@ Score: ___ / 100 — Security: ___ Architecture: ___ Style: ___
 
 - [ ] Changes are limited to what the linked issue requires (no unrelated
       refactors).
-- [ ] `.factory/ambiguity-checklist.md` has been reviewed; any new entries
-      added by this PR have been resolved or explicitly accepted.
+- [ ] Every item under "Ambiguities recorded by the agents" (below, if
+      present) has been resolved or explicitly accepted.
 
 ## Manual verification
 
-- [ ] I ran the app locally (`npm run dev`) and exercised the changed
-      behavior end-to-end.
-- [ ] Admin-only actions were verified as rejected for non-admin/unauthenticated
+- [ ] I ran the product locally and exercised the changed behavior
+      end-to-end.
+- [ ] Privileged actions were verified as rejected for unauthorized
       requests, where applicable.
 
 ## Notes for reviewer

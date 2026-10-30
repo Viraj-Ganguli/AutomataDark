@@ -1,0 +1,130 @@
+# Run key -- mint or revoke one build's throwaway OpenRouter key.
+#
+# Called by orchestrator.yml and spine-test.yml; never triggered on its own.
+#
+# This is the ONLY code that ever runs alongside OPENROUTER_MANAGEMENT_KEY:
+#   - it checks out nothing and uses no actions -- just the inline scripts
+#     below, which live under .github/workflows/, the one path a job's
+#     GITHUB_TOKEN can't modify. A compromised agent job therefore can't
+#     plant code that would later run next to the management key.
+#   - the key is an environment secret in "factory", whose branch policy only
+#     releases it to runs on the default branch. Agent jobs never declare
+#     that environment, so the management key is never sent to their runner.
+#   - the management key reaches curl on stdin, never argv, and the response
+#     carrying the new key is never printed.
+#
+# The minted key leaves this workflow only as AES-256 ciphertext (job outputs
+# and step env are visible in public logs). run-agent.sh decrypts it with
+# FACTORY_KEY_PASSPHRASE, masks it, and drops the passphrase before the
+# agent starts.
+
+name: Run key
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "mint or revoke"
+        required: true
+        type: string
+      limit_usd:
+        description: "mint: spending cap for the key (clamped to 0-50)"
+        required: false
+        type: string
+        default: "5"
+      ttl_minutes:
+        description: "mint: minutes until the key expires on its own (clamped to 30-360)"
+        required: false
+        type: string
+        default: "180"
+      key_hash:
+        description: "revoke: hash of the key to delete"
+        required: false
+        type: string
+    outputs:
+      key_cipher:
+        description: "mint: the new key, encrypted with FACTORY_KEY_PASSPHRASE"
+        value: ${{ jobs.run-key.outputs.key_cipher }}
+      key_hash:
+        description: "mint: the new key's hash (not secret; used to revoke it)"
+        value: ${{ jobs.run-key.outputs.key_hash }}
+
+permissions: {}
+
+jobs:
+  run-key:
+    runs-on: ubuntu-latest
+    environment: factory
+    permissions: {}
+    outputs:
+      key_cipher: ${{ steps.mint.outputs.key_cipher }}
+      key_hash: ${{ steps.mint.outputs.key_hash }}
+    steps:
+      - name: Mint this build's throwaway key
+        id: mint
+        if: inputs.mode == 'mint'
+        env:
+          MGMT_KEY: ${{ secrets.OPENROUTER_MANAGEMENT_KEY }}
+          FACTORY_KEY_PASSPHRASE: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+          LIMIT: ${{ inputs.limit_usd }}
+          TTL: ${{ inputs.ttl_minutes }}
+          KEY_NAME: factory ${{ github.repository }} run ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MGMT_KEY" ] || [ -z "$FACTORY_KEY_PASSPHRASE" ]; then
+            echo "::error::OPENROUTER_MANAGEMENT_KEY (in the 'factory' environment) or FACTORY_KEY_PASSPHRASE is missing, or this run isn't on the default branch. Run: .factory/factory.sh setup"
+            exit 1
+          fi
+
+          # Hard ceilings: no config edit can raise a run key's worth past these.
+          LIMIT=$(jq -n --arg v "$LIMIT" '($v | tonumber? // 5) | if . <= 0 then 5 elif . > 50 then 50 else . end')
+          TTL=$(jq -n --arg v "$TTL" '($v | tonumber? // 180) | floor | if . < 30 then 30 elif . > 360 then 360 else . end')
+          EXPIRES=$(date -u -d "+${TTL} min" +%Y-%m-%dT%H:%M:%SZ)
+          BODY=$(jq -nc --arg n "$KEY_NAME" --argjson l "$LIMIT" --arg e "$EXPIRES" \
+            '{name: $n, limit: $l, expires_at: $e}')
+
+          RESP=$(printf 'Authorization: Bearer %s\n' "$MGMT_KEY" \
+            | curl -sS -X POST https://openrouter.ai/api/v1/keys -H @- \
+                -H 'Content-Type: application/json' -d "$BODY" -w '\n%{http_code}') || true
+          CODE=$(tail -n1 <<<"$RESP"); RESP=$(sed '$d' <<<"$RESP")
+          if [ "$CODE" != 201 ] && [ "$CODE" != 200 ]; then
+            echo "::error::OpenRouter refused to mint a key (HTTP $CODE): $(jq -r '.error.message // "no message"' <<<"$RESP" 2>/dev/null). Is OPENROUTER_MANAGEMENT_KEY a management key from openrouter.ai/settings/management-keys?"
+            exit 1
+          fi
+          KEY=$(jq -r '.key // empty' <<<"$RESP")
+          HASH=$(jq -r '.data.hash // empty' <<<"$RESP")
+          RESP=""
+          if [ -z "$KEY" ] || [ -z "$HASH" ]; then
+            echo "::error::Unexpected response from OpenRouter while minting the key."
+            exit 1
+          fi
+          echo "::add-mask::$KEY"
+
+          CIPHER=$(printf '%s' "$KEY" \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt -a -A \
+                -pass env:FACTORY_KEY_PASSPHRASE)
+          KEY=""
+          echo "key_cipher=$CIPHER" >> "$GITHUB_OUTPUT"
+          echo "key_hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Minted run key ${HASH:0:12}... (limit \$$LIMIT, expires $EXPIRES)."
+          echo "Run key: limit \$$LIMIT, expires $EXPIRES, deleted when the build ends." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete this build's throwaway key
+        if: inputs.mode == 'revoke'
+        env:
+          MGMT_KEY: ${{ secrets.OPENROUTER_MANAGEMENT_KEY }}
+          KEY_HASH: ${{ inputs.key_hash }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$KEY_HASH" =~ ^[0-9a-f]{16,128}$ ]]; then
+            echo "::error::No valid key hash to revoke."
+            exit 1
+          fi
+          CODE=$(printf 'Authorization: Bearer %s\n' "$MGMT_KEY" \
+            | curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H @- \
+                "https://openrouter.ai/api/v1/keys/$KEY_HASH") || CODE=000
+          case "$CODE" in
+            200|204) echo "Run key ${KEY_HASH:0:12}... deleted." ;;
+            404) echo "Run key ${KEY_HASH:0:12}... already gone." ;;
+            *) echo "::error::Couldn't delete run key ${KEY_HASH:0:12}... (HTTP $CODE). It expires on its own; to remove it now, delete it at openrouter.ai/settings/keys."; exit 1 ;;
+          esac

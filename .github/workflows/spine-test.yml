@@ -3,19 +3,19 @@
 # Manually-triggered workflow that proves the CI "spine" the real
 # orchestrator (.github/workflows/orchestrator.yml) depends on actually
 # works in this repo, for a given harness/model combination:
-#   - a postgres service container the app can connect to
-#   - npm run install:all / npm run migrate / npm test
+#   - the product's own setup and test commands (the "product" block of
+#     .factory/orchestrator.config.json), if any are configured
 #   - .factory/scripts/run-agent.sh installing and running the chosen
 #     harness against OpenRouter, and editing a file
 #
 # Unlike the orchestrator, this workflow is meant to stay -- use it whenever
-# you add a new harness, change OPENROUTER_API_KEY, or want to sanity-check a
+# you add a new harness, rotate a key, or want to sanity-check a
 # model slug before putting it in .factory/orchestrator.config.json. Dispatch
 # it via the Actions tab, picking a harness and (optionally) a model slug
 # native to that harness, then confirm:
 #   - the run is green
 #   - it pushed a commit to a new agent/spine-test-<run id> branch that adds
-#     a one-line comment to server/src/app.js
+#     a one-line spine-test.txt
 #   - the OpenRouter activity dashboard (openrouter.ai/activity) shows a
 #     request that actually served the model you asked for -- this is the
 #     real proof that per-stage model selection works, not just that the run
@@ -27,11 +27,13 @@ on:
   workflow_dispatch:
     inputs:
       harness:
-        description: "Harness to smoke-test: claude-code, opencode, or codex. Leave empty to use .factory/orchestrator.config.json's default."
+        description: "Harness to smoke-test (config = use .factory/orchestrator.config.json's default)"
         required: false
-        type: string
+        type: choice
+        default: config
+        options: [config, claude-code, opencode, codex]
       model:
-        description: "OpenRouter model slug native to the chosen harness (e.g. ~anthropic/claude-sonnet-latest, openai/gpt-5.3-codex). Leave empty to use the config default."
+        description: "OpenRouter model slug (e.g. ~anthropic/claude-sonnet-latest, openai/gpt-5.3-codex). Empty = config default."
         required: false
         type: string
 
@@ -39,32 +41,36 @@ permissions:
   contents: write
 
 env:
-  DATABASE_URL: postgres://factorylab:factorylab@localhost:5432/factorylab
-  SESSION_SECRET: ci-spine-test-secret
-  NODE_ENV: test
+  FACTORY_RUN_DIR: /tmp/factory-run
 
 jobs:
+  # Same throwaway-key flow as the orchestrator: minted here, deleted below.
+  mint-key:
+    permissions: {}
+    uses: ./.github/workflows/run-key.yml
+    secrets: inherit
+    with:
+      mode: mint
+      limit_usd: "1"
+      ttl_minutes: "60"
+
   spine:
+    needs: [mint-key]
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: factorylab
-          POSTGRES_PASSWORD: factorylab
-          POSTGRES_DB: factorylab
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U factorylab -d factorylab"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
+          persist-credentials: false
+
+      - name: Preflight -- model slug
+        env:
+          STAGE_OVERRIDE_HARNESS: ${{ inputs.harness }}
+          STAGE_OVERRIDE_MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          bash .factory/scripts/run-agent.sh --check spine
 
       - name: Create scratch branch
         env:
@@ -76,38 +82,25 @@ jobs:
           git checkout -b "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
-
-      - name: Install dependencies
-        run: npm run install:all
-
-      - name: Run migrations
-        run: npm run migrate
+      - name: Set up product (no-op if product.setup is empty)
+        uses: ./.github/actions/setup-product
 
       - name: Assemble prompt
         run: |
           cat > /tmp/spine-prompt.md <<'EOF'
-          Add a single-line comment to the top of `server/src/app.js` (just
-          below any existing top-of-file comments) describing what the
-          module exports. Do not change anything else -- no other files, no
-          other lines.
+          Create a file named `spine-test.txt` at the repository root
+          containing exactly one line: `spine ok`. Do not change anything
+          else -- no other files.
           EOF
 
       - name: Run agent
         timeout-minutes: 10
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_KEY_CIPHER: ${{ needs.mint-key.outputs.key_cipher }}
+          FACTORY_KEY_PASSPHRASE: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
           STAGE_OVERRIDE_HARNESS: ${{ inputs.harness }}
           STAGE_OVERRIDE_MODEL: ${{ inputs.model }}
-        run: bash .factory/scripts/run-agent.sh spine /tmp/spine-prompt.md "Read,Write,Edit,Bash(npm test*)"
+        run: bash .factory/scripts/run-agent.sh spine /tmp/spine-prompt.md "Read,Write,Edit"
 
       - name: Show diff
         run: |
@@ -116,16 +109,52 @@ jobs:
           git diff --cached --stat
           git diff --cached --name-only
 
-      - name: Run test suite
-        run: npm test
+      - name: Run product test suite (if configured)
+        run: |
+          set -euo pipefail
+          if bash .factory/scripts/product.sh configured; then
+            bash .factory/scripts/product.sh test
+          else
+            echo "No product.test configured -- skipping the product suite."
+          fi
 
       - name: Commit and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if git diff --cached --quiet; then
             echo "Agent made no changes -- nothing to commit. Spine still considered green if the steps above succeeded."
             exit 0
           fi
-          git commit -m "chore: spine test -- agent edit + green CI"
-          git push -u origin "$BRANCH"
+          git -c core.hooksPath=/dev/null commit -m "chore: spine test -- agent edit + green CI"
+          git push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
           echo "Pushed to branch $BRANCH -- delete it once you've confirmed this run in the OpenRouter dashboard."
+
+      - name: Scrub run record
+        if: always()
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash .factory/scripts/scrub.sh "$FACTORY_RUN_DIR"/* || true
+
+      - name: Upload run record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-spine
+          path: |
+            ${{ env.FACTORY_RUN_DIR }}/prompts-*.md
+            ${{ env.FACTORY_RUN_DIR }}/agent-*.log
+          if-no-files-found: ignore
+          overwrite: true
+
+  revoke-key:
+    needs: [mint-key, spine]
+    if: always() && needs.mint-key.outputs.key_hash != ''
+    permissions: {}
+    uses: ./.github/workflows/run-key.yml
+    secrets: inherit
+    with:
+      mode: revoke
+      key_hash: ${{ needs.mint-key.outputs.key_hash }}

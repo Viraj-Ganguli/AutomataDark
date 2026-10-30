@@ -1,0 +1,40 @@
+# Build the factory's gates: the Lean `factory` binary in .factory/lean.
+#
+# `lake build` checks every proof and runs the build-time tests, so a binary
+# only comes out of this action if all of them pass. The Lean toolchain and
+# build output are cached, keyed on the sources, so an unchanged factory
+# rebuilds in seconds.
+name: Build factory gates
+description: Build and verify the Lean gate binary; outputs its path.
+
+outputs:
+  path:
+    description: Path to the built `factory` binary.
+    value: ${{ github.workspace }}/.factory/lean/.lake/build/bin/factory
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Lean toolchain and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.elan
+          .factory/lean/.lake
+        key: lean-${{ runner.os }}-${{ hashFiles('.factory/lean/lean-toolchain') }}-${{ hashFiles('.factory/lean/**/*.lean', '.factory/lean/lakefile.toml', '.factory/lean/tests/**') }}
+        restore-keys: lean-${{ runner.os }}-${{ hashFiles('.factory/lean/lean-toolchain') }}-
+
+    - name: Install elan
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -x "$HOME/.elan/bin/lake" ]; then
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+        fi
+        echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+    - name: Build and verify
+      shell: bash
+      working-directory: .factory/lean
+      run: lake build

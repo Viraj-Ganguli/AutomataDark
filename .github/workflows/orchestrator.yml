@@ -1,18 +1,39 @@
 # Agent Orchestrator
 #
 # Drives a human-filed NLSpec issue (.github/ISSUE_TEMPLATE/nlspec.md) through
-# QA -> Coder -> Review -> PR using Claude Code in CI.
+# QA -> Coder -> Review -> PR, with every agent call routed through
+# OpenRouter.
 #
 # Trigger: a repo collaborator applies the configured label (see
 # .factory/orchestrator.config.json, default "build") to an NLSpec issue, or a
 # maintainer manually dispatches this workflow for a given issue number.
 #
-# Tuning (harness, model, max-turns, autoMerge, the trigger label) lives in
-# .factory/orchestrator.config.json, not in this file. Every stage runs
-# through .factory/scripts/run-agent.sh, which installs the configured
+# Tuning (harness, model, max-turns, attempts, autoMerge, the trigger label)
+# lives in .factory/orchestrator.config.json, not in this file. Every stage
+# runs through .factory/scripts/run-agent.sh, which installs the configured
 # harness (claude-code, opencode, or codex) and points it at OpenRouter. See
-# README.md for the one-time setup (OPENROUTER_API_KEY secret, the "build"
-# label, workflow permissions) and how to trigger/configure a run.
+# README.md for setup (`.factory/factory.sh setup`) and configuration.
+#
+# Three zones, kept apart on purpose (see README "Factory vs. product"):
+#   factory     .factory/, .github/ -- the pipeline definition; agents never edit it
+#   product     paths in config .paths.<stage> -- the only thing committed/PR'd
+#   run record  prompts, agent logs, ambiguity notes, scores -- uploaded as
+#               the run-<stage> artifacts and summarized in the PR body;
+#               never committed
+#
+# Agent jobs check out with persist-credentials: false, so the agent has no
+# push credentials -- only the workflow's own commit steps push, after
+# .factory/scripts/check-paths.sh has passed.
+#
+# Every gate decision (write scope, red check, rubric score) is made by the
+# Lean `factory` binary in .factory/lean, whose decision functions are proved
+# correct there. The setup job builds it from main (the build fails on any
+# unproved theorem) and each agent job copies it into its snapshot before the
+# agent runs. `factory workflow` checks this file still matches the Pipeline
+# model the theorems are about -- run .factory/factory.sh verify after editing.
+#
+# Nothing here assumes a language or test framework: product commands come
+# from the "product" block of the config, via .factory/scripts/product.sh.
 
 name: Agent Orchestrator
 
@@ -25,12 +46,14 @@ on:
         description: "NLSpec issue number to build"
         required: true
         type: number
-      model:
-        description: "Override the OpenRouter model slug for every stage of this run (e.g. ~anthropic/claude-opus-latest). Leave empty to use .factory/orchestrator.config.json."
-        required: false
-        type: string
       harness:
-        description: "Override the harness for every stage of this run: claude-code, opencode, or codex. Leave empty to use .factory/orchestrator.config.json."
+        description: "Harness for every stage of this run (config = use .factory/orchestrator.config.json)"
+        required: false
+        type: choice
+        default: config
+        options: [config, claude-code, opencode, codex]
+      model:
+        description: "OpenRouter model slug for every stage of this run, e.g. ~anthropic/claude-opus-latest. Empty = use the config file."
         required: false
         type: string
 
@@ -39,17 +62,28 @@ permissions:
   pull-requests: write
   issues: write
 
+# One build per issue at a time; a second label/dispatch queues behind it.
+concurrency:
+  group: orchestrator-issue-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
 env:
-  DATABASE_URL: postgres://factorylab:factorylab@localhost:5432/factorylab
-  SESSION_SECRET: ci-orchestrator-secret
-  NODE_ENV: test
+  # Run record for the current job (see header). Uploaded as run-<stage>.
+  FACTORY_RUN_DIR: /tmp/factory-run
+  # Agent jobs snapshot .factory/scripts + config here *before* the agent
+  # runs, and every later step uses the snapshot -- so an agent that edits
+  # check-paths.sh or the config in its working tree can't change the rules
+  # it's judged by.
+  FACTORY_SCRIPTS: /tmp/factory-scripts
+  # Where product.testReport writes its JUnit XML (read by `factory red`).
+  FACTORY_JUNIT: /tmp/factory-junit.xml
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ---------------------------------------------------------------------
   # guard: decide whether this event should start a build, and for which
-  # issue. Reads the trigger label from .factory/orchestrator.config.json
-  # and (for label events) checks the labeling user is a collaborator.
+  # issue; then validate every stage's model slug against OpenRouter so a
+  # typo fails in seconds, not after QA has spent credits.
   # ---------------------------------------------------------------------
   guard:
     runs-on: ubuntu-latest
@@ -58,9 +92,13 @@ jobs:
       issue_number: ${{ steps.check.outputs.issue_number }}
       model_override: ${{ steps.check.outputs.model_override }}
       harness_override: ${{ steps.check.outputs.harness_override }}
+      key_limit: ${{ steps.preflight.outputs.key_limit }}
+      key_ttl: ${{ steps.preflight.outputs.key_ttl }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Evaluate trigger
         id: check
@@ -77,10 +115,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          CONFIG_LABEL=$(jq -r '.label' .factory/orchestrator.config.json)
+          CONFIG_LABEL=$(jq -r '.label // "build"' .factory/orchestrator.config.json)
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "Manually dispatched for issue #$DISPATCH_ISSUE_NUMBER."
+            [ "$DISPATCH_HARNESS" = "config" ] && DISPATCH_HARNESS=""
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "issue_number=$DISPATCH_ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
             echo "model_override=$DISPATCH_MODEL" >> "$GITHUB_OUTPUT"
@@ -105,8 +144,42 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Preflight -- model slugs
+        id: preflight
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          STAGE_OVERRIDE_MODEL: ${{ steps.check.outputs.model_override }}
+          STAGE_OVERRIDE_HARNESS: ${{ steps.check.outputs.harness_override }}
+        run: |
+          set -euo pipefail
+          echo "key_limit=$(jq -r '.runKey.limitUsd // 5' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
+          echo "key_ttl=$(jq -r '.runKey.ttlMinutes // 180' .factory/orchestrator.config.json)" >> "$GITHUB_OUTPUT"
+          echo "### Resolved stage configuration" >> "$GITHUB_STEP_SUMMARY"
+          for stage in qa coder review; do
+            bash .factory/scripts/run-agent.sh --check "$stage"
+            echo "- $(bash .factory/scripts/run-agent.sh --resolve "$stage")" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   # ---------------------------------------------------------------------
-  # setup: create (or reuse) the per-issue feature branch and announce the
+  # mint-key: create this build's throwaway OpenRouter key (capped at
+  # runKey.limitUsd, expiring after runKey.ttlMinutes) from the management
+  # key. See run-key.yml for why this is the only place that key exists.
+  # Agent jobs get the run key encrypted; revoke-key deletes it at the end.
+  # ---------------------------------------------------------------------
+  mint-key:
+    needs: [guard]
+    if: needs.guard.outputs.proceed == 'true'
+    permissions: {}
+    uses: ./.github/workflows/run-key.yml
+    secrets: inherit
+    with:
+      mode: mint
+      limit_usd: ${{ needs.guard.outputs.key_limit }}
+      ttl_minutes: ${{ needs.guard.outputs.key_ttl }}
+
+  # ---------------------------------------------------------------------
+  # setup: build the gate binary from main, make sure the pipeline's labels
+  # exist, create (or reuse) the per-issue feature branch, and announce the
   # run on the issue.
   # ---------------------------------------------------------------------
   setup:
@@ -120,6 +193,27 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
+
+      - name: Build factory gates (Lean; fails on any unproved theorem)
+        id: factory-bin
+        uses: ./.github/actions/factory-bin
+
+      - name: Upload factory gates
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-bin
+          path: ${{ steps.factory-bin.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Ensure pipeline labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for l in agent:qa-done agent:coder-done agent:review-done agent:pr-open agent:merged agent:failed; do
+            gh label create "$l" --color ededed --force >/dev/null
+          done
 
       - name: Derive branch name
         id: branch
@@ -142,8 +236,6 @@ jobs:
           BRANCH: ${{ steps.branch.outputs.branch }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             echo "Branch $BRANCH already exists on origin; reusing it."
           else
@@ -162,48 +254,40 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --body "Build started on branch \`$BRANCH\`. [Follow the run]($RUN_URL)."
 
   # ---------------------------------------------------------------------
-  # qa: Claude writes failing tests under tests/** for the issue's
-  # Acceptance Criteria, using tests/golden/ as the shared harness.
+  # qa: the agent writes failing tests (inside .paths.qa) for the issue's
+  # Acceptance Criteria, using the protected paths as the shared harness.
   # ---------------------------------------------------------------------
   qa:
-    needs: [guard, setup]
+    needs: [guard, mint-key, setup]
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: factorylab
-          POSTGRES_PASSWORD: factorylab
-          POSTGRES_DB: factorylab
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U factorylab -d factorylab"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.setup.outputs.branch }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Fetch factory gates
+        uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
+          name: factory-bin
+          path: ${{ env.FACTORY_SCRIPTS }}
 
-      - name: Install dependencies
-        run: npm run install:all
+      - name: Snapshot factory scripts (before any agent runs)
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_SCRIPTS"
+          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          chmod +x "$FACTORY_SCRIPTS/factory"
+          echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
+          echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"
+          echo "TEST_TOOL=$(bash "$FACTORY_SCRIPTS"/product.sh tool-pattern)" >> "$GITHUB_ENV"
 
-      - name: Run migrations
-        run: npm run migrate
+      - name: Set up product
+        uses: ./.github/actions/setup-product
+        with:
+          scripts: ${{ env.FACTORY_SCRIPTS }}
 
       - name: Assemble QA prompt
         env:
@@ -211,6 +295,7 @@ jobs:
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           {
             cat .factory/qa.nlspec.md
             echo
@@ -222,128 +307,146 @@ jobs:
             echo
             echo "---"
             echo
-            echo "The shared test harness is at \`tests/golden/\` — read \`tests/golden/README.md\` for the full interface."
+            echo "The shared, read-only test harness lives under: $(jq -r '.paths.protected | map("`" + . + "`") | join(", ")' "$ORCHESTRATOR_CONFIG"). Read its README, if it has one, for the interface."
+            echo
+            echo "---"
+            echo
+            bash "$FACTORY_SCRIPTS"/check-paths.sh --describe qa
             echo
             echo "---"
             echo
             echo "## Action required"
             echo
             echo "Write the failing tests for issue #$ISSUE_NUMBER right now."
-            echo "Use your Write or Edit tools to create test file(s) under \`tests/<feature>/\`."
+            echo "Use your Write or Edit tools to create test file(s) inside your write scope."
             echo "Do NOT describe what you will do — call the tools and write the files."
-            echo "When done, run \`npm test\` to confirm the new tests fail for the right reason."
-          } > /tmp/qa-prompt.md
+            echo "When done, run \`$TEST_CMD\` to confirm the new tests fail for the right reason."
+          } > "$RUNNER_TEMP/qa-prompt.md"
 
       - name: Run QA agent
         timeout-minutes: 20
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_KEY_CIPHER: ${{ needs.mint-key.outputs.key_cipher }}
+          FACTORY_KEY_PASSPHRASE: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
           STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
           STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
         run: >-
-          bash .factory/scripts/run-agent.sh qa /tmp/qa-prompt.md
-          "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
+          bash "$FACTORY_SCRIPTS"/run-agent.sh qa "$RUNNER_TEMP/qa-prompt.md"
+          "Read,Write,Edit,Glob,Grep,$TEST_TOOL,Bash(git status*),Bash(git diff*),Bash(git log*)"
 
-      - name: Stage QA agent changes
-        run: git add -A
+      - name: Enforce QA write scope (factory/product boundary)
+        run: bash "$FACTORY_SCRIPTS"/check-paths.sh qa "$BASE_SHA" "$FACTORY_RUN_DIR"
 
-      - name: Enforce QA path allowlist
+      - name: Run test suite (expect red, for the right reason)
         run: |
-          set -euo pipefail
-          CHANGED=$(git diff --name-only --cached HEAD)
-          if [ -z "$CHANGED" ]; then
-            echo "QA agent made no changes."
-            exit 1
-          fi
-          echo "Changed files:"
-          echo "$CHANGED"
+          set -uo pipefail
+          STRICT=$(jq -r 'if .strictRedCheck == false then "false" else "true" end' "$ORCHESTRATOR_CONFIG")
 
-          BAD=""
-          while IFS= read -r f; do
-            case "$f" in
-              tests/golden/*) BAD="$BAD$f " ;;
-              tests/*) ;;
-              .github/workflows/*) ;;
-              *) BAD="$BAD$f " ;;
-            esac
-          done <<< "$CHANGED"
-
-          if [ -n "$BAD" ]; then
-            echo "QA agent touched disallowed paths: $BAD"
-            exit 1
+          if [ "$STRICT" = "true" ]; then
+            bash "$FACTORY_SCRIPTS"/product.sh test-report
+            STATUS=$?
+          else
+            bash "$FACTORY_SCRIPTS"/product.sh test
+            STATUS=$?
           fi
 
-      - name: Run test suite (expect red)
-        run: |
-          set +e
-          npm test
-          STATUS=$?
-          set -e
           if [ "$STATUS" -eq 0 ]; then
             echo "Test suite is green before the coder agent has run -- QA tests aren't red."
             exit 1
           fi
-          echo "Test suite is red as expected (exit $STATUS)."
+          echo "Test suite is red (exit $STATUS)."
+
+          if [ "$STRICT" = "true" ]; then
+            "$FACTORY_SCRIPTS"/factory red "$FACTORY_JUNIT" "$FACTORY_RUN_DIR/changed-qa.txt"
+          fi
 
       - name: Commit and push QA tests
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
+          BRANCH: ${{ needs.setup.outputs.branch }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "test: add failing tests for issue #$ISSUE_NUMBER (QA agent)"
-          git push
+          git diff --cached --quiet || git -c core.hooksPath=/dev/null commit -m "test: add failing tests for issue #$ISSUE_NUMBER (QA agent)"
+          git push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
 
       - name: Label issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: gh issue edit "$ISSUE_NUMBER" --add-label "agent:qa-done"
 
+      - name: Scrub run record
+        if: always()
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash "$FACTORY_SCRIPTS"/scrub.sh "$FACTORY_RUN_DIR"/* || true
+
+      - name: Upload run record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-qa
+          # Named files only: anything else an agent drops in the run dir
+          # is not published.
+          path: |
+            ${{ env.FACTORY_RUN_DIR }}/prompts-*.md
+            ${{ env.FACTORY_RUN_DIR }}/agent-*.log
+            ${{ env.FACTORY_RUN_DIR }}/ambiguities-*.md
+            ${{ env.FACTORY_RUN_DIR }}/changed-*.txt
+            ${{ env.FACTORY_RUN_DIR }}/review-*.json
+            ${{ env.FACTORY_RUN_DIR }}/review-report.md
+          if-no-files-found: ignore
+          overwrite: true
+
   # ---------------------------------------------------------------------
-  # coder: Claude edits client/** and server/** until the QA agent's tests
-  # (and the rest of the suite) pass.
+  # coder: the agent edits the product (inside .paths.coder) until the QA
+  # agent's tests (and the rest of the suite) pass. If the suite is still red after
+  # an attempt, the failing output is fed back and the agent goes again, up
+  # to stages.coder.maxAttempts.
   # ---------------------------------------------------------------------
   coder:
-    needs: [guard, setup, qa]
+    needs: [guard, mint-key, setup, qa]
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: factorylab
-          POSTGRES_PASSWORD: factorylab
-          POSTGRES_DB: factorylab
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U factorylab -d factorylab"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.setup.outputs.branch }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Fetch factory gates
+        uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
+          name: factory-bin
+          path: ${{ env.FACTORY_SCRIPTS }}
 
-      - name: Install dependencies
-        run: npm run install:all
+      - name: Snapshot factory scripts (before any agent runs)
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_SCRIPTS"
+          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          chmod +x "$FACTORY_SCRIPTS/factory"
+          echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
+          echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"
+          echo "TEST_TOOL=$(bash "$FACTORY_SCRIPTS"/product.sh tool-pattern)" >> "$GITHUB_ENV"
 
-      - name: Run migrations
-        run: npm run migrate
+      - name: Set up product
+        uses: ./.github/actions/setup-product
+        with:
+          scripts: ${{ env.FACTORY_SCRIPTS }}
+
+      - name: Fetch QA run record
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: run-qa
+          path: ${{ runner.temp }}/qa-record
 
       - name: Assemble coder prompt
         env:
@@ -351,10 +454,25 @@ jobs:
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           {
             cat .factory/coder.nlspec.md
             echo
             echo "---"
+            echo
+            bash "$FACTORY_SCRIPTS"/check-paths.sh --describe coder
+            echo
+            echo "---"
+            if [ -s "$RUNNER_TEMP/qa-record/ambiguities-qa.md" ]; then
+              echo
+              echo "## Open questions the QA agent recorded"
+              echo
+              echo "These are unresolved. Don't guess past them silently; if one blocks you, append to the checklist too."
+              echo
+              cat "$RUNNER_TEMP/qa-record/ambiguities-qa.md"
+              echo
+              echo "---"
+            fi
             echo
             echo "## GitHub issue #$ISSUE_NUMBER"
             echo
@@ -364,80 +482,124 @@ jobs:
             echo
             echo "## Failing tests"
             echo
-            echo 'The QA agent already committed failing tests under tests/**. Run `npm test` to see the current failures, then iterate (read -> edit -> re-run) until it exits 0. Do not edit anything under tests/**.'
+            echo "The QA agent already committed failing tests. Run \`$TEST_CMD\` to see the current failures, then iterate (read -> edit -> re-run) until it exits 0. Do not edit the tests or anything else outside your write scope."
             echo
             echo "---"
             echo
             echo "## Action required"
             echo
-            echo "Start now: run \`npm test\`, read the failures, edit the application source, and repeat until green."
+            echo "Start now: run \`$TEST_CMD\`, read the failures, edit the application source, and repeat until green."
             echo "Do NOT describe what you will do — call the tools and fix the code."
-          } > /tmp/coder-prompt.md
+          } > "$RUNNER_TEMP/coder-prompt.base.md"
 
-      - name: Run coder agent
-        timeout-minutes: 25
+      - name: Run coder agent (with repair attempts)
+        timeout-minutes: 45
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_KEY_CIPHER: ${{ needs.mint-key.outputs.key_cipher }}
+          FACTORY_KEY_PASSPHRASE: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
           STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
           STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
-        run: >-
-          bash .factory/scripts/run-agent.sh coder /tmp/coder-prompt.md
-          "Read,Write,Edit,Glob,Grep,Bash(npm test*),Bash(git status*),Bash(git diff*),Bash(git log*)"
-
-      - name: Stage coder agent changes
-        run: git add -A
-
-      - name: Enforce coder path allowlist
         run: |
-          set -euo pipefail
-          CHANGED=$(git diff --name-only --cached HEAD)
-          if [ -z "$CHANGED" ]; then
-            echo "Coder agent made no changes."
-            exit 1
-          fi
-          echo "Changed files:"
-          echo "$CHANGED"
+          set -uo pipefail
+          ATTEMPTS=$(bash "$FACTORY_SCRIPTS"/run-agent.sh --get coder maxAttempts)
+          PROMPT="$RUNNER_TEMP/coder-prompt.md"
+          cp "$RUNNER_TEMP/coder-prompt.base.md" "$PROMPT"
 
-          BAD=""
-          while IFS= read -r f; do
-            case "$f" in
-              client/*) ;;
-              server/*) ;;
-              *) BAD="$BAD$f " ;;
-            esac
-          done <<< "$CHANGED"
+          for i in $(seq 1 "$ATTEMPTS"); do
+            echo "::group::Coder attempt $i of $ATTEMPTS"
+            bash "$FACTORY_SCRIPTS"/run-agent.sh coder "$PROMPT" \
+              "Read,Write,Edit,Glob,Grep,$TEST_TOOL,Bash(git status*),Bash(git diff*),Bash(git log*)" \
+              || echo "Agent exited non-zero on attempt $i; checking the suite anyway."
+            echo "::endgroup::"
 
-          if [ -n "$BAD" ]; then
-            echo "Coder agent touched disallowed paths: $BAD"
-            exit 1
-          fi
+            # Agent-written code runs here; product.sh keeps the key material out of its env.
+            if bash "$FACTORY_SCRIPTS"/product.sh test > "$RUNNER_TEMP/test-output.txt" 2>&1; then
+              echo "Suite is green after attempt $i."
+              exit 0
+            fi
+            echo "Suite still red after attempt $i."
+
+            if [ "$i" -lt "$ATTEMPTS" ]; then
+              {
+                cat "$RUNNER_TEMP/coder-prompt.base.md"
+                echo
+                echo "---"
+                echo
+                echo "## Previous attempt $i left the suite red"
+                echo
+                echo "Your earlier edits are still in the working tree. This is the tail of \`$TEST_CMD\`:"
+                echo
+                echo '```'
+                tail -c 8000 "$RUNNER_TEMP/test-output.txt"
+                echo '```'
+                echo
+                echo "Fix the remaining failures in application code. Do not edit the tests; if a test is unsatisfiable, record it in .factory/ambiguity-checklist.md."
+              } > "$PROMPT"
+            fi
+          done
+          tail -c 8000 "$RUNNER_TEMP/test-output.txt"
+          echo "::error::Suite still red after $ATTEMPTS coder attempt(s)."
+          exit 1
+
+      - name: Enforce coder write scope (factory/product boundary)
+        run: bash "$FACTORY_SCRIPTS"/check-paths.sh coder "$BASE_SHA" "$FACTORY_RUN_DIR"
 
       - name: Run test suite (must be green)
-        run: npm test
+        run: bash "$FACTORY_SCRIPTS"/product.sh test
 
       - name: Commit and push coder changes
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
+          BRANCH: ${{ needs.setup.outputs.branch }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat: implement issue #$ISSUE_NUMBER (coder agent)"
-          git push
+          git diff --cached --quiet || git -c core.hooksPath=/dev/null commit -m "feat: implement issue #$ISSUE_NUMBER (coder agent)"
+          git push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
 
       - name: Label issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: gh issue edit "$ISSUE_NUMBER" --add-label "agent:coder-done"
 
+      - name: Scrub run record
+        if: always()
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash "$FACTORY_SCRIPTS"/scrub.sh "$FACTORY_RUN_DIR"/* || true
+
+      - name: Upload run record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-coder
+          # Named files only: anything else an agent drops in the run dir
+          # is not published.
+          path: |
+            ${{ env.FACTORY_RUN_DIR }}/prompts-*.md
+            ${{ env.FACTORY_RUN_DIR }}/agent-*.log
+            ${{ env.FACTORY_RUN_DIR }}/ambiguities-*.md
+            ${{ env.FACTORY_RUN_DIR }}/changed-*.txt
+            ${{ env.FACTORY_RUN_DIR }}/review-*.json
+            ${{ env.FACTORY_RUN_DIR }}/review-report.md
+          if-no-files-found: ignore
+          overwrite: true
+
   # ---------------------------------------------------------------------
-  # review: Claude scores the cumulative diff against .factory/rubric.json.
-  # score-rubric.js computes the weighted pass/fail deterministically.
+  # review: the agent scores the cumulative diff against .factory/rubric.json.
+  # `factory score` computes the weighted pass/fail in exact arithmetic.
   # ---------------------------------------------------------------------
   review:
-    needs: [guard, setup, qa, coder]
+    needs: [guard, mint-key, setup, qa, coder]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     outputs:
       overall: ${{ steps.score.outputs.overall }}
       pass: ${{ steps.score.outputs.pass }}
@@ -445,75 +607,74 @@ jobs:
       dim_architecture: ${{ steps.score.outputs.dim_architecture }}
       dim_style: ${{ steps.score.outputs.dim_style }}
       report_b64: ${{ steps.score.outputs.report_b64 }}
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: factorylab
-          POSTGRES_PASSWORD: factorylab
-          POSTGRES_DB: factorylab
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U factorylab -d factorylab"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.setup.outputs.branch }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Fetch factory gates
+        uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
+          name: factory-bin
+          path: ${{ env.FACTORY_SCRIPTS }}
 
-      - name: Install dependencies
-        run: npm run install:all
+      - name: Snapshot factory scripts (before any agent runs)
+        run: |
+          set -euo pipefail
+          mkdir -p "$FACTORY_SCRIPTS"
+          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          chmod +x "$FACTORY_SCRIPTS/factory"
+          echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
+          echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"
+          echo "TEST_TOOL=$(bash "$FACTORY_SCRIPTS"/product.sh tool-pattern)" >> "$GITHUB_ENV"
 
-      - name: Run migrations
-        run: npm run migrate
+      - name: Set up product
+        uses: ./.github/actions/setup-product
+        with:
+          scripts: ${{ env.FACTORY_SCRIPTS }}
 
       - name: Re-run full test suite
-        run: npm test
+        run: bash "$FACTORY_SCRIPTS"/product.sh test
 
       - name: Compute cumulative diff vs main
         run: |
           set -euo pipefail
-          git fetch origin main
-          git diff --name-only origin/main...HEAD > /tmp/changed-files.txt
-          git diff origin/main...HEAD > /tmp/full-diff.txt
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git diff --name-only origin/main...HEAD > "$RUNNER_TEMP/changed-files.txt"
+          # Lockfiles are noise for a rubric review and can be huge.
+          git diff origin/main...HEAD -- . \
+            ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/yarn.lock' ':(exclude,glob)**/pnpm-lock.yaml' \
+            ':(exclude,glob)**/poetry.lock' ':(exclude,glob)**/uv.lock' ':(exclude,glob)**/Cargo.lock' \
+            ':(exclude,glob)**/go.sum' ':(exclude,glob)**/Gemfile.lock' ':(exclude,glob)**/composer.lock' \
+            > "$RUNNER_TEMP/full-diff.txt"
           echo "Changed files since main:"
-          cat /tmp/changed-files.txt
+          cat "$RUNNER_TEMP/changed-files.txt"
 
-          while IFS= read -r f; do
-            case "$f" in
-              tests/golden/*)
-                echo "tests/golden/** was modified (file: $f) -- failing the review job."
-                exit 1
-                ;;
-            esac
-          done < /tmp/changed-files.txt
+          # Protected paths (config .paths.protected) must be untouched across
+          # the whole branch, not just per stage.
+          while IFS= read -r p; do
+            if grep -q "^$p" "$RUNNER_TEMP/changed-files.txt"; then
+              echo "Protected path $p was modified on this branch -- failing the review job."
+              grep "^$p" "$RUNNER_TEMP/changed-files.txt"
+              exit 1
+            fi
+          done < <(jq -r '.paths.protected // [] | .[]' "$ORCHESTRATOR_CONFIG")
 
       - name: Assemble review prompt
         env:
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
+          DIFF_LIMIT=80000
           {
             echo "# Review agent"
             echo
             echo "Score the cumulative diff for issue #$ISSUE_NUMBER (changes since"
             echo "main, listed and shown below) against every criterion in the rubric"
-            echo "below. For each criterion, give a 0-100 score and a one-sentence"
+            echo "below. For each criterion, give an integer score from 0 to 100 and a one-sentence"
             echo "comment justifying it."
             echo
             echo "When done, write your results to \`.factory/review-result.json\`"
@@ -530,7 +691,7 @@ jobs:
             echo
             echo "Include every criterion id from the rubric's dimensions[].criteria[].id."
             echo "Do not create, edit, or delete any other file -- in particular, never"
-            echo "modify anything under tests/**, including tests/golden/**."
+            echo "modify any test or anything under the protected paths."
             echo
             echo "---"
             echo
@@ -545,34 +706,39 @@ jobs:
             echo "## Changed files (vs main)"
             echo
             echo '```'
-            cat /tmp/changed-files.txt
+            cat "$RUNNER_TEMP/changed-files.txt"
             echo '```'
             echo
             echo "---"
             echo
-            echo "## Full diff (vs main)"
+            echo "## Full diff (vs main, lockfiles excluded)"
             echo
             echo '```diff'
-            cat /tmp/full-diff.txt
+            head -c "$DIFF_LIMIT" "$RUNNER_TEMP/full-diff.txt"
             echo '```'
-          } > /tmp/review-prompt.md
+            if [ "$(wc -c < "$RUNNER_TEMP/full-diff.txt")" -gt "$DIFF_LIMIT" ]; then
+              echo
+              echo "The diff above is truncated at $DIFF_LIMIT bytes. Run \`git diff origin/main...HEAD -- <file>\` for the files it doesn't cover before scoring."
+            fi
+          } > "$RUNNER_TEMP/review-prompt.md"
 
       - name: Run review agent
         timeout-minutes: 15
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_KEY_CIPHER: ${{ needs.mint-key.outputs.key_cipher }}
+          FACTORY_KEY_PASSPHRASE: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
           STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
           STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
         run: >-
-          bash .factory/scripts/run-agent.sh review /tmp/review-prompt.md
-          "Read,Write,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(npm test*)"
+          bash "$FACTORY_SCRIPTS"/run-agent.sh review "$RUNNER_TEMP/review-prompt.md"
+          "Read,Write,Glob,Grep,Bash(git diff*),Bash(git log*),$TEST_TOOL"
 
       - name: Enforce review write-scope
         run: |
           set -euo pipefail
           CHANGED=$(git status --porcelain)
-          if [ -n "$CHANGED" ]; then
-            echo "Review agent modified tracked files (it should only write the gitignored .factory/review-result.json):"
+          if [ -n "$CHANGED" ] || [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
+            echo "Review agent modified the repo (it should only write the gitignored .factory/review-result.json):"
             echo "$CHANGED"
             exit 1
           fi
@@ -585,9 +751,9 @@ jobs:
         id: score
         run: |
           set -euo pipefail
-          node .factory/scripts/score-rubric.js \
+          "$FACTORY_SCRIPTS"/factory score \
             .factory/rubric.json .factory/review-result.json .factory/review-score.json \
-            > /tmp/review-report.md
+            > "$RUNNER_TEMP/review-report.md"
 
           OVERALL=$(jq -r '.overall' .factory/review-score.json)
           PASS=$(jq -r '.pass' .factory/review-score.json)
@@ -603,26 +769,60 @@ jobs:
 
           {
             echo "report_b64<<REPORT_EOF"
-            base64 < /tmp/review-report.md | tr -d '\n'
+            base64 < "$RUNNER_TEMP/review-report.md" | tr -d '\n'
             echo
             echo "REPORT_EOF"
           } >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/review-report.md" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$FACTORY_RUN_DIR"
+          cp .factory/review-result.json .factory/review-score.json "$RUNNER_TEMP/review-report.md" "$FACTORY_RUN_DIR/"
+
+      - name: Scrub review report
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash "$FACTORY_SCRIPTS"/scrub.sh "$RUNNER_TEMP/review-report.md"
 
       - name: Post review comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
-        run: gh issue comment "$ISSUE_NUMBER" --body-file /tmp/review-report.md
+        run: gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/review-report.md"
 
       - name: Label issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: gh issue edit "$ISSUE_NUMBER" --add-label "agent:review-done"
 
+      - name: Scrub run record
+        if: always()
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash "$FACTORY_SCRIPTS"/scrub.sh "$FACTORY_RUN_DIR"/* || true
+
+      - name: Upload run record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-review
+          # Named files only: anything else an agent drops in the run dir
+          # is not published.
+          path: |
+            ${{ env.FACTORY_RUN_DIR }}/prompts-*.md
+            ${{ env.FACTORY_RUN_DIR }}/agent-*.log
+            ${{ env.FACTORY_RUN_DIR }}/ambiguities-*.md
+            ${{ env.FACTORY_RUN_DIR }}/changed-*.txt
+            ${{ env.FACTORY_RUN_DIR }}/review-*.json
+            ${{ env.FACTORY_RUN_DIR }}/review-report.md
+          if-no-files-found: ignore
+          overwrite: true
+
   # ---------------------------------------------------------------------
-  # pr: open the gatekeeper PR with the rubric score injected, and either
-  # leave it for human review or auto-merge per .factory/orchestrator.config.json.
+  # pr: open the gatekeeper PR with the rubric score and any recorded
+  # ambiguities injected, and either leave it for human review or
+  # auto-merge per .factory/orchestrator.config.json.
   # ---------------------------------------------------------------------
   pr:
     needs: [guard, setup, qa, coder, review]
@@ -633,9 +833,21 @@ jobs:
         with:
           ref: ${{ needs.setup.outputs.branch }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch run records
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: run-*
+          merge-multiple: true
+          path: ${{ env.FACTORY_RUN_DIR }}
 
       - name: Build PR body
         env:
+          STAGE_OVERRIDE_MODEL: ${{ needs.guard.outputs.model_override }}
+          STAGE_OVERRIDE_HARNESS: ${{ needs.guard.outputs.harness_override }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
           OVERALL: ${{ needs.review.outputs.overall }}
           DIM_SECURITY: ${{ needs.review.outputs.dim_security }}
@@ -644,7 +856,8 @@ jobs:
           REPORT_B64: ${{ needs.review.outputs.report_b64 }}
         run: |
           set -euo pipefail
-          echo "$REPORT_B64" | base64 -d > /tmp/review-report.md
+          echo "$REPORT_B64" | base64 -d > "$RUNNER_TEMP/review-report.md"
+          AMBIGUITIES=$(cat "$FACTORY_RUN_DIR"/ambiguities-*.md 2>/dev/null || true)
 
           {
             sed -E \
@@ -654,28 +867,65 @@ jobs:
             echo
             echo "---"
             echo
-            cat /tmp/review-report.md
+            if [ -n "$AMBIGUITIES" ]; then
+              echo "## Ambiguities recorded by the agents"
+              echo
+              echo "The agents hit questions the spec didn't answer. Resolve these before merging:"
+              echo
+              echo "$AMBIGUITIES"
+              echo
+              echo "---"
+              echo
+            fi
+            cat "$RUNNER_TEMP/review-report.md"
+            echo
+            echo "---"
+            echo
+            echo "<details><summary>Factory run</summary>"
+            echo
+            echo "This PR contains product changes only. The run record (prompts, raw"
+            echo "agent logs, notes, rubric JSON) is attached to the [workflow run]($RUN_URL)"
+            echo "as the \`run-qa\`, \`run-coder\`, and \`run-review\` artifacts."
+            echo
+            for stage in qa coder review; do
+              echo "- $(bash .factory/scripts/run-agent.sh --resolve "$stage")"
+            done
+            echo
+            echo "</details>"
             echo
             echo "Closes #${ISSUE_NUMBER}"
-          } > /tmp/pr-body.md
+          } > "$RUNNER_TEMP/pr-body.md"
 
-      - name: Create pull request
+      - name: Scrub PR body
+        env:
+          SCRUB_EXTRA: ${{ secrets.FACTORY_KEY_PASSPHRASE }}
+        run: bash .factory/scripts/scrub.sh "$RUNNER_TEMP/pr-body.md"
+
+      - name: Create (or update) pull request
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
           BRANCH: ${{ needs.setup.outputs.branch }}
         run: |
           set -euo pipefail
           TITLE=$(gh issue view "$ISSUE_NUMBER" --json title,number \
             --jq '"[Agent] " + .title + " (#" + (.number|tostring) + ")"')
-          URL=$(gh pr create --title "$TITLE" --body-file /tmp/pr-body.md --base main --head "$BRANCH")
+          URL=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+          if [ -n "$URL" ]; then
+            echo "Re-run: updating existing PR $URL"
+            gh pr edit "$URL" --body-file "$RUNNER_TEMP/pr-body.md"
+          else
+            URL=$(gh pr create --title "$TITLE" --body-file "$RUNNER_TEMP/pr-body.md" --base main --head "$BRANCH")
+          fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "number=$(basename "$URL")" >> "$GITHUB_OUTPUT"
 
       - name: Merge gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           REVIEW_PASS: ${{ needs.review.outputs.pass }}
@@ -696,7 +946,7 @@ jobs:
   # the issue so a human doesn't have to dig through the Actions tab.
   # ---------------------------------------------------------------------
   report-failure:
-    needs: [guard, setup, qa, coder, review, pr]
+    needs: [guard, mint-key, setup, qa, coder, review, pr]
     if: failure() && needs.guard.outputs.issue_number != ''
     runs-on: ubuntu-latest
     steps:
@@ -708,5 +958,20 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          gh issue comment "$ISSUE_NUMBER" --body "Build pipeline failed. See the [workflow run]($RUN_URL) for details. No PR was opened."
+          gh issue comment "$ISSUE_NUMBER" --body "Build pipeline failed. See the [workflow run]($RUN_URL) for details. No PR was opened. To retry, use **Re-run all jobs** (each build's OpenRouter key is deleted when the build ends, so *Re-run failed jobs* can't work) or re-apply the label."
+          gh label create "agent:failed" --color ededed --force >/dev/null || true
           gh issue edit "$ISSUE_NUMBER" --add-label "agent:failed"
+
+  # ---------------------------------------------------------------------
+  # revoke-key: delete this build's throwaway key, whatever happened. If
+  # this ever fails, the key still expires on its own after ttlMinutes.
+  # ---------------------------------------------------------------------
+  revoke-key:
+    needs: [guard, mint-key, setup, qa, coder, review, pr, report-failure]
+    if: always() && needs.mint-key.outputs.key_hash != ''
+    permissions: {}
+    uses: ./.github/workflows/run-key.yml
+    secrets: inherit
+    with:
+      mode: revoke
+      key_hash: ${{ needs.mint-key.outputs.key_hash }}

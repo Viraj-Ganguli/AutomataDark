@@ -1,0 +1,10 @@
+name = "factory"
+version = "0.2.0"
+defaultTargets = ["Factory", "factory"]
+
+[[lean_lib]]
+name = "Factory"
+
+[[lean_exe]]
+name = "factory"
+root = "Main"
