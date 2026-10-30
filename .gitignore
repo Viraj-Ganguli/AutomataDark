@@ -65,10 +65,10 @@ web_modules/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variable files
+# dotenv environment variable files (a product that commits an example file
+# can add its own `!.env.example`)
 .env
 .env.*
-!.env.example
 
 # Scratch output written by the orchestrator's review job
 # (.github/workflows/orchestrator.yml) — never committed.
@@ -155,3 +155,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Lean build output
+.factory/lean/.lake/
