@@ -278,7 +278,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$FACTORY_SCRIPTS"
-          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          cp .factory/scripts/*.sh .factory/scripts/*.lean .factory/lean/lean-toolchain .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
           chmod +x "$FACTORY_SCRIPTS/factory"
           echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
           echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"
@@ -406,7 +406,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$FACTORY_SCRIPTS"
-          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          cp .factory/scripts/*.sh .factory/scripts/*.lean .factory/lean/lean-toolchain .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
           chmod +x "$FACTORY_SCRIPTS/factory"
           echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
           echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"
@@ -416,6 +416,18 @@ jobs:
         uses: ./.github/actions/setup-product
         with:
           scripts: ${{ env.FACTORY_SCRIPTS }}
+
+      - name: Install Lean (if the product has proof obligations)
+        run: |
+          set -euo pipefail
+          if [ -n "$(jq -r '.product.proofs // ""' "$ORCHESTRATOR_CONFIG")" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain none
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+            echo "PROOF_TOOLS=,Bash(lake build*)" >> "$GITHUB_ENV"
+          else
+            echo "PROOF_TOOLS=" >> "$GITHUB_ENV"
+          fi
 
       - name: Fetch QA run record
         uses: actions/download-artifact@v4
@@ -451,13 +463,14 @@ jobs:
           for i in $(seq 1 "$ATTEMPTS"); do
             echo "::group::Coder attempt $i of $ATTEMPTS"
             bash "$FACTORY_SCRIPTS"/run-agent.sh coder "$PROMPT" \
-              "Read,Write,Edit,Glob,Grep,$TEST_TOOL,Bash(git status*),Bash(git diff*),Bash(git log*)" \
+              "Read,Write,Edit,Glob,Grep,$TEST_TOOL$PROOF_TOOLS,Bash(git status*),Bash(git diff*),Bash(git log*)" \
               || echo "Agent exited non-zero on attempt $i; checking the suite anyway."
             echo "::endgroup::"
 
             # Agent-written code runs here; product.sh keeps the key material out of its env.
-            if bash "$FACTORY_SCRIPTS"/product.sh test > "$RUNNER_TEMP/test-output.txt" 2>&1; then
-              echo "Suite is green after attempt $i."
+            if bash "$FACTORY_SCRIPTS"/product.sh test > "$RUNNER_TEMP/test-output.txt" 2>&1 \
+              && bash "$FACTORY_SCRIPTS"/proofs.sh >> "$RUNNER_TEMP/test-output.txt" 2>&1; then
+              echo "Suite is green (and proof obligations met) after attempt $i."
               exit 0
             fi
             echo "Suite still red after attempt $i."
@@ -476,6 +489,9 @@ jobs:
 
       - name: Run test suite (must be green)
         run: bash "$FACTORY_SCRIPTS"/product.sh test
+
+      - name: Check proof obligations
+        run: bash "$FACTORY_SCRIPTS"/proofs.sh
 
       - name: Commit and push coder changes
         env:
@@ -555,7 +571,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$FACTORY_SCRIPTS"
-          cp .factory/scripts/*.sh .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
+          cp .factory/scripts/*.sh .factory/scripts/*.lean .factory/lean/lean-toolchain .factory/orchestrator.config.json "$FACTORY_SCRIPTS/"
           chmod +x "$FACTORY_SCRIPTS/factory"
           echo "ORCHESTRATOR_CONFIG=$FACTORY_SCRIPTS/orchestrator.config.json" >> "$GITHUB_ENV"
           echo "TEST_CMD=$(bash "$FACTORY_SCRIPTS"/product.sh show test)" >> "$GITHUB_ENV"

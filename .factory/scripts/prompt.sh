@@ -70,6 +70,16 @@ case "${1:-}" in
     echo
     echo "The QA agent already committed failing tests. Run \`$TEST_CMD\` to see the current failures, then iterate (read -> edit -> re-run) until it exits 0. Do not edit the tests or anything else outside your write scope."
     sep
+    PROOFS=$(jq -r '.product.proofs // ""' "$CONFIG")
+    if [ -n "$PROOFS" ]; then
+      echo "## Proof obligations"
+      echo
+      echo "This product has Lean proof obligations in \`$PROOFS/Spec/obligations.json\` (approved by a human; read-only)."
+      echo "Implement each listed constant under \`$PROOFS/Impl/\` and prove each obligation as a theorem with exactly"
+      echo "that name and statement. Check with \`lake build\` in \`$PROOFS\`. CI rejects \`sorry\`, custom axioms,"
+      echo "\`native_decide\`, \`@[implemented_by]\`/\`@[extern]\`, and any change to a statement."
+      sep
+    fi
     echo "## Action required"
     echo
     echo "Start now: run \`$TEST_CMD\`, read the failures, edit the application source, and repeat until green."

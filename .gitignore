@@ -157,4 +157,4 @@ vite.config.ts.timestamp-*
 .vite/
 
 # Lean build output
-.factory/lean/.lake/
+.lake/

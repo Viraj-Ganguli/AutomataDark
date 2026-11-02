@@ -21,8 +21,15 @@ def qa : PathGate.Scope := { allowed := ["tests/"], protect := ["tests/golden/"]
 #guard !PathGate.acceptPaths qa ["tests/a.test.js", "src/x.py"]
 #guard PathGate.violations qa ["tests/a.py", "tests/golden/db.py", "README.md"] ==
   ["tests/golden/db.py", "README.md"]
-#guard !PathGate.validPrefix "tests" && PathGate.validPrefix "tests/" && !PathGate.validPrefix "/"
+#guard PathGate.validEntry "tests/" && PathGate.validEntry "package.json" && !PathGate.validEntry "/" && !PathGate.validEntry ""
 #guard PathGate.accept qa [.rename "tests/golden/app.js" "tests/app.js"] == false
+#guard PathGate.acceptNameOnly qa [.rename "tests/golden/app.js" "tests/app.js"] == true
+-- An exact-file entry covers that file only, never a sibling with the same prefix.
+def coder : PathGate.Scope := { allowed := ["src/", "package.json"], protect := ["src/golden.lock"] }
+#guard PathGate.acceptPaths coder ["package.json", "src/a.py"]
+#guard !PathGate.acceptPaths coder ["package.json.bak"]
+#guard !PathGate.acceptPaths coder ["src/golden.lock"]
+#guard PathGate.acceptPaths coder ["src/golden.lock2"]
 
 /-! ## JUnit + red check on real reports -/
 

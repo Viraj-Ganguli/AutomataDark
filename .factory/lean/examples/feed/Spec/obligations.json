@@ -1,0 +1,9 @@
+{
+  "import": ["Impl"],
+  "specModules": ["Spec"],
+  "obligations": [
+    { "theorem": "Impl.feedPlan_correct", "predicate": "Spec.PlanCorrect", "args": ["Impl.feedPlan"] },
+    { "theorem": "Impl.checkInv_sound", "predicate": "Spec.CheckSound", "args": ["Impl.checkInv"] },
+    { "theorem": "Impl.insertOk_preserves", "predicate": "Spec.InsertPreserves", "args": ["Impl.insertOk"] }
+  ]
+}

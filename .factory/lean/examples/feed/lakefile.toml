@@ -1,0 +1,11 @@
+# A product's proofs package (see .factory/lean/README.md, "Proof obligations").
+# Spec/ (and this file, lean-toolchain, Spec/obligations.json) are protected:
+# a human approves them. Impl/ is the coder agent's.
+name = "proofs"
+defaultTargets = ["Spec", "Impl"]
+
+[[lean_lib]]
+name = "Spec"
+
+[[lean_lib]]
+name = "Impl"
