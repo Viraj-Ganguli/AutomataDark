@@ -86,6 +86,10 @@ STATUS=$?
 [ "$STATUS" = 0 ] && [ "$(paste -sd, - < "$MODELS_SEEN")" = reviewer,fast,strong,reviewer ] \
   && echo "$OUT" | grep -q "Coder attempts: fast,strong"; check "a red fast attempt escalates to the strong model; other stages keep theirs" $?
 
+A=$(FACTORY_AGENT_CMD="$WORK/agent.sh" FACTORY_STAGES=qa bash .factory/factory.sh run "$WORK/spec.md" 2>&1 | sed -n 's/^  branch    //p')
+B=$(FACTORY_AGENT_CMD="$WORK/agent.sh" FACTORY_STAGES=qa bash .factory/factory.sh run "$WORK/spec.md" 2>&1 | sed -n 's/^  branch    //p')
+[ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]; check "back-to-back runs of one spec get separate branches" $?
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
