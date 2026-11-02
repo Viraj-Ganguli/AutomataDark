@@ -38,14 +38,24 @@
 #   STAGE_OVERRIDE_MODEL     overrides .stages.<stage>.model / .model
 #   ORCHESTRATOR_CONFIG      config path (default .factory/orchestrator.config.json)
 #   SKIP_MODEL_CHECK=1       skip the OpenRouter catalog lookup
+#   FACTORY_ATTEMPT          which attempt this is (default 1); picks the entry
+#                            of a model ladder (see below)
 #   FACTORY_RUN_DIR          if set, the prompt and the agent's raw output are
 #                            appended to <dir>/prompts-<stage>.md and
-#                            <dir>/agent-<stage>.log (the run record that CI
-#                            uploads as an artifact)
+#                            <dir>/agent-<stage>.log, and one usage line per
+#                            session (usage.sh: turns, tokens, cost) to
+#                            <dir>/usage.jsonl (the run record that CI uploads
+#                            as an artifact)
 #
 # Config resolution per key: dispatch override > stages.<stage>.<key> >
 # top-level <key>. Model slugs are opaque -- any id from
 # https://openrouter.ai/models works with no edits to this script.
+#
+# "model" may also be a list, a ladder: attempt n uses entry n and the last
+# repeats, e.g. ["~google/gemini-flash-latest", "~anthropic/claude-opus-latest"]
+# for a fast model first and a strong one on retries. An entry can name its
+# own harness, "opencode:<slug>", so one ladder can mix harnesses. The stage
+# then gets max(maxAttempts, ladder length) attempts. See models.sh.
 
 set -euo pipefail
 
@@ -86,18 +96,34 @@ resolve() {
     '.stages[$stage][$key] // .[$key] // empty' "$CONFIG"
 }
 
-HARNESS="$(resolve harness "${STAGE_OVERRIDE_HARNESS:-}")"
-MODEL="$(resolve model "${STAGE_OVERRIDE_MODEL:-}")"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ATTEMPT="${FACTORY_ATTEMPT:-1}"
+pick_model() { # pick_model <attempt> -- sets HARNESS and MODEL for that attempt
+  local h m
+  { IFS= read -r h; IFS= read -r m; } < <(bash "$HERE/models.sh" pick ci "$STAGE" "$1")
+  MODEL="$m"
+  HARNESS="${STAGE_OVERRIDE_HARNESS:-${h:-$(resolve harness)}}"
+}
+pick_model "$ATTEMPT"
+LADDER="$(bash "$HERE/models.sh" count ci "$STAGE")"
 MAX_TURNS="$(resolve maxTurns)"
 MAX_ATTEMPTS="$(resolve maxAttempts)"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-1}"
+[ "$LADDER" -gt "$MAX_ATTEMPTS" ] && MAX_ATTEMPTS="$LADDER"
 # Optional npm version pin per harness, e.g. "harnessVersions": {"codex": "0.50.0"}.
 HARNESS_VERSION="$(jq -r --arg h "$HARNESS" '.harnessVersions[$h] // "latest"' "$CONFIG")"
 
 case "$MODE" in
   resolve)
-    printf 'stage=%s harness=%s model=%s maxTurns=%s maxAttempts=%s harnessVersion=%s\n' \
-      "$STAGE" "$HARNESS" "$MODEL" "${MAX_TURNS:-none}" "$MAX_ATTEMPTS" "$HARNESS_VERSION"
+    if [ "$LADDER" -gt 1 ]; then
+      L=""
+      for i in $(seq 1 "$LADDER"); do pick_model "$i"; L="$L${L:+ -> }$HARNESS:$MODEL"; done
+      printf 'stage=%s models=[%s] maxTurns=%s maxAttempts=%s\n' \
+        "$STAGE" "$L" "${MAX_TURNS:-none}" "$MAX_ATTEMPTS"
+    else
+      printf 'stage=%s harness=%s model=%s maxTurns=%s maxAttempts=%s harnessVersion=%s\n' \
+        "$STAGE" "$HARNESS" "$MODEL" "${MAX_TURNS:-none}" "$MAX_ATTEMPTS" "$HARNESS_VERSION"
+    fi
     exit 0
     ;;
   get)
@@ -113,6 +139,7 @@ case "$MODE" in
     ;;
 esac
 
+validate() {
 if [ -z "$HARNESS" ]; then
   echo "run-agent.sh: no harness resolved for stage '$STAGE' (checked stages.$STAGE.harness and .harness in $CONFIG)" >&2
   exit 1
@@ -128,6 +155,7 @@ case "$HARNESS" in
     exit 1
     ;;
 esac
+}
 
 # ---------------------------------------------------------------------------
 # Preflight: is the slug a real OpenRouter model that supports tool calling?
@@ -180,10 +208,16 @@ check_model() {
 }
 
 if [ "$MODE" = check ]; then
-  echo "run-agent.sh: stage=$STAGE harness=$HARNESS model=$MODEL"
-  check_model
-  exit $?
+  for i in $(seq 1 "$(( LADDER > 1 ? LADDER : 1 ))"); do
+    pick_model "$i"
+    validate
+    echo "run-agent.sh: stage=$STAGE attempt=$i harness=$HARNESS model=$MODEL"
+    check_model || exit 1
+  done
+  exit 0
 fi
+validate
+HARNESS_VERSION="$(jq -r --arg h "$HARNESS" '.harnessVersions[$h] // "latest"' "$CONFIG")"
 
 # ---------------------------------------------------------------------------
 # Run mode
@@ -238,10 +272,7 @@ esac
 
 check_model
 
-echo "run-agent.sh: stage=$STAGE harness=$HARNESS@$HARNESS_VERSION model=$MODEL max_turns=${MAX_TURNS:-none}"
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-  echo "- **$STAGE**: \`$HARNESS@$HARNESS_VERSION\` · \`$MODEL\` · maxTurns=${MAX_TURNS:-n/a}" >> "$GITHUB_STEP_SUMMARY"
-fi
+echo "run-agent.sh: stage=$STAGE attempt=$ATTEMPT harness=$HARNESS@$HARNESS_VERSION model=$MODEL max_turns=${MAX_TURNS:-none}"
 
 # Harness config/state goes in a scratch dir, never in $HOME or the repo, so
 # local runs don't clobber your own ~/.codex or opencode setup and CI runs
@@ -251,6 +282,7 @@ AGENT_TMP="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/run-agent-$STAGE.XXXXXX"
 # Linux caps a single argv string at 128 KiB; harnesses that take the prompt
 # as an argument get it from a file instead once it's anywhere near that.
 PROMPT_BYTES=$(wc -c < "$PROMPT_FILE")
+STARTED=$(date +%s)
 
 npm_install() {
   # npm_install <package> <binary>
@@ -367,6 +399,7 @@ EOF
   # "-" reads the prompt from stdin, so prompt size is never an issue.
   codex exec \
     --skip-git-repo-check \
+    --json \
     -m "$MODEL" \
     - < "$PROMPT_FILE"
 }
@@ -388,11 +421,22 @@ if [ -n "${FACTORY_RUN_DIR:-}" ]; then
   } | bash "$(dirname "$0")/scrub.sh" --stdin >> "$FACTORY_RUN_DIR/prompts-$STAGE.md"
   # The log is uploaded as an artifact, and GitHub only masks secrets in job
   # logs, not artifacts. Scrub the key in case an agent echoes its env.
-  run_harness 2>&1 | bash "$(dirname "$0")/scrub.sh" --stdin | tee -a "$FACTORY_RUN_DIR/agent-$STAGE.log" || STATUS=$?
+  run_harness 2>&1 | bash "$(dirname "$0")/scrub.sh" --stdin | tee -a "$FACTORY_RUN_DIR/agent-$STAGE.log" "$AGENT_TMP/output" || STATUS=$?
 else
-  run_harness || STATUS=$?
+  run_harness | tee "$AGENT_TMP/output" || STATUS=$?
 fi
 STATUS="${STATUS:-0}"
+
+USAGE="$(bash "$HERE/usage.sh" "$HARNESS" "$STAGE" "$ATTEMPT" "$MODEL" "$(( $(date +%s) - STARTED ))" "$AGENT_TMP/output" 2>/dev/null || true)"
+if [ -n "$USAGE" ]; then
+  [ -n "${FACTORY_RUN_DIR:-}" ] && echo "$USAGE" >> "$FACTORY_RUN_DIR/usage.jsonl"
+  echo "run-agent.sh: usage $USAGE"
+fi
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -n "$USAGE" ]; then
+  jq -r --arg hv "$HARNESS_VERSION" '"- **\(.stage)** attempt \(.attempt): `\(.harness)@\($hv)` · `\(.model)` · \(.turns // "?") turns · \(((.inputTokens // 0) + (.outputTokens // 0)) / 1000 | round)k tokens"
+    + (if .costUsd != null then " · $\(.costUsd * 1000 | round / 1000)" else "" end) + " · \(.seconds)s"' \
+    <<<"$USAGE" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+fi
 
 # A harness that dies mid-run because the key hit its credit cap usually
 # says something cryptic; say it plainly.

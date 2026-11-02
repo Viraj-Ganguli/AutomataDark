@@ -16,6 +16,10 @@ any harness (Claude Code, opencode, Codex) and any
   binary whose decision functions are machine-checked
   ([Verified gates](#verified-gates-lean-4)). The CI build fails if any
   proof breaks.
+- **Runs on your subscription.** `.factory/factory.sh run my-feature.md`
+  runs the whole pipeline locally through the Claude Code or Codex CLI you're
+  logged into, with no API keys ([Run it locally](#run-it-locally-on-your-subscription)).
+  The same pipeline runs in GitHub Actions on OpenRouter when you want it hands-off.
 - **Factory only.** This repository holds just the factory (`.factory/`,
   `.github/`). The product it builds lives in your repo, next to a copy of
   it. **To get started, run `.factory/factory.sh setup`.**
@@ -134,6 +138,68 @@ Core Lean only, no Mathlib; the toolchain is pinned in
 `.factory/lean/lean-toolchain`. See [`.factory/lean/README.md`](.factory/lean/README.md)
 for the theorem list, how proofs are tied to the shipped code, and what the
 proofs don't cover.
+
+## Run it locally on your subscription
+
+The quickest way to try the factory, and the cheapest: run the whole
+QA → Coder → Review pipeline on your machine with the Claude Code or Codex
+CLI you're already logged into. No GitHub Actions, no OpenRouter, no API
+keys, no extra spend. The prompts and gates are the same as in CI.
+
+```bash
+# once: log in with your subscription, and install elan for the gates
+claude auth login            # Claude Pro/Max   (or: codex login, with ChatGPT)
+curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh
+
+# fill in "product" in .factory/orchestrator.config.json, then:
+.factory/factory.sh run my-feature.md      # an NLSpec: "# Title" + the issue template's sections
+.factory/factory.sh run 12                 # or a GitHub issue number (needs gh)
+```
+
+- **Which CLI and model:** any mix of Claude Code and Codex, per stage and
+  per attempt. Each setting is `[claude:|codex:]model`, using the CLI's own
+  model names; `codex:` alone means Codex's default model. From highest
+  priority: `FACTORY_LOCAL_<STAGE>_MODELS` (e.g.
+  `FACTORY_LOCAL_REVIEW_MODELS=codex:`), `FACTORY_LOCAL_MODEL` (every
+  stage), then `localModel` in the config (per stage under `stages`, like
+  every key). With no harness named: `FACTORY_LOCAL_HARNESS`, else the
+  config's `harness` if it's `claude-code` or `codex`, else whichever is
+  installed. A cross-family reviewer is
+  `FACTORY_LOCAL_MODEL=claude:sonnet FACTORY_LOCAL_REVIEW_MODELS=codex:`.
+- **No surprise bills:** API-key variables (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, …) are removed from the agent's environment, and the run
+  refuses to start unless every CLI it will use reports a subscription
+  login (Claude Code: `claude.ai`; Codex: ChatGPT).
+- **Your checkout is never touched:** each run works in a new git worktree on
+  branch `agent/local-<slug>-<time>`, next to your repo in
+  `<repo>-agent-runs/`, starting from your last commit. Prompts, agent output,
+  open questions, and the rubric report go in `<worktree>.record/`. Nothing is
+  pushed. The summary prints the commands to look at the result, open a PR,
+  or throw the run away.
+- **Same gates as CI:** write scope after each stage, red for the right reason,
+  green tests, a clean tree after review,
+  and the exact rubric score. The rules are snapshotted before any agent
+  runs, as in CI.
+- Run part of the pipeline with `FACTORY_STAGES=qa` or `FACTORY_STAGES=qa,coder`.
+- **Fast coder, strong fallback:** a list is a ladder.
+  `FACTORY_LOCAL_CODER_MODELS=claude:haiku,claude:opus` (or
+  `...,codex:gpt-5.5`) runs the coder's first attempt on a fast model and,
+  only if the suite is still red, the next on a strong one (the last entry
+  repeats). The coder is the one stage whose work is checked by execution
+  (tests and gates), so a fast model there is safe; QA writes those checks
+  and review has none, so keep them strong. CI takes the same ladder as a
+  `model` list ([Plug in any model or harness](#plug-in-any-model-or-harness)).
+- **What a run used:** `<worktree>.record/usage.jsonl` has one line per
+  agent session, in the same shape for every harness: stage, attempt,
+  harness, model, seconds, turns, tokens, and cost where the harness reports
+  it (Claude Code does, at list price, which a subscription doesn't bill but
+  is a fair measure of quota; Codex reports tokens only). The summary prints
+  the totals. Your own `~/.claude/settings.json` applies, so an
+  `advisorModel` there lets a fast Claude coder consult that model, which
+  shows up in the log.
+
+Subscription plans have usage limits rather than per-token costs; a run
+uses roughly what doing the same work interactively would.
 
 ## Agent orchestrator
 
@@ -283,7 +349,8 @@ flowchart TD
 | Key | Meaning |
 | --- | --- |
 | `harness` | `claude-code`, `opencode`, or `codex`. |
-| `model` | Any slug from [openrouter.ai/models](https://openrouter.ai/models). `~provider/…-latest` aliases (e.g. `~anthropic/claude-sonnet-latest`) always track the newest release. |
+| `model` | Any slug from [openrouter.ai/models](https://openrouter.ai/models). `~provider/…-latest` aliases (e.g. `~anthropic/claude-sonnet-latest`) always track the newest release. Or a list, a ladder: attempt *n* uses entry *n*, the last repeats, and the stage gets max(`maxAttempts`, list length) attempts. An entry can name its own harness, `"opencode:<slug>"`, so one ladder can mix harnesses and providers. |
+| `localModel` | The same, for [local subscription runs](#run-it-locally-on-your-subscription), in the CLI's own names: `"claude:haiku"`, `"codex:gpt-5.5"`, `"codex:"` (Codex's default). |
 | `maxTurns` | Turn cap per stage. Honored by `claude-code` only; the other harnesses are bounded by the step's `timeout-minutes`. |
 | `maxAttempts` | How many times a stage runs with the previous failures fed back. Used by `coder` (default `2`). |
 | `stages.<qa\|coder\|review>` | Per-stage overrides for any key above. |
@@ -315,6 +382,20 @@ model family (see [why](#design-notes-and-research)):
   "stages": {
     "coder":  { "maxTurns": 8, "maxAttempts": 2 },
     "review": { "harness": "opencode", "model": "~google/gemini-pro-latest" }
+  }
+}
+```
+
+**Example: fast coder, strong fallback.** The coder's first attempt on a
+fast model, retries on a strong one from another provider. The coder's work
+is checked by tests and gates, so a miss costs only a retry. Each session's
+turns, tokens, and cost go in the run record's `usage.jsonl` and the job
+summary:
+
+```json
+{
+  "stages": {
+    "coder": { "model": ["opencode:~google/gemini-flash-latest", "claude-code:~anthropic/claude-opus-latest"] }
   }
 }
 ```
@@ -501,6 +582,27 @@ A few choices in this pipeline come from recent work on coding agents:
   small, they're where an exploit pays off (a forged rubric score, a file
   moved out of the protected harness — both real bugs found while writing
   these proofs), and every build depends on them.
+- **Fast models where execution checks the work, strong ones where nothing
+  does.** A fast "System 1" model can do as well as a slow one when every
+  answer is checked by running it. Repeated sampling from a cheaper model,
+  with unit tests picking the result, beat single samples from stronger
+  models on SWE-bench at lower cost
+  ([Large Language Monkeys, 2024](https://arxiv.org/abs/2407.21787)), and
+  cascades that move up to a bigger model only on failure are a standard
+  way to cut cost
+  ([routing and cascades survey, 2026](https://arxiv.org/abs/2603.04445)).
+  In this pipeline only the coder's output is checked by execution (tests
+  and the write-scope gate), so only the coder gets a fast-first ladder.
+  QA writes those checks; a weak QA means weak tests the coder passes
+  trivially. Review has no check at all. Both stay on strong models, and
+  review on a different family (above). In a local trial on three specs
+  (recurring dates, a 4-file feature, a vague spec), QA fixed per spec and
+  graded by held-out tests the agents never saw, a Haiku coder matched an
+  Opus coder (27/27 held-out tests each) with about 20× less coder compute,
+  about a third less for the whole run. The difference that showed:
+  Haiku recorded fewer open questions, which QA on a strong model already
+  covers. It's a small sample (one or two runs per spec and model), and
+  Haiku never needed the fallback.
 - **Feed failures back.** One retry with the concrete test output in context
   (in the style of [Reflexion](https://arxiv.org/abs/2303.11366)) is a cheap
   way to recover from a near miss without a full re-run.
@@ -518,6 +620,9 @@ A few choices in this pipeline come from recent work on coding agents:
 
 - `maxTurns` only bounds `claude-code`. For `opencode` and `codex`, the
   agent step's `timeout-minutes` is the backstop.
+- A model ladder's fallback has so far run only with a stand-in agent: in
+  live trials the fast coder was green on its first attempt every time. And
+  usage is what each harness reports: Codex gives tokens but no cost.
 - `codex` and `opencode` aren't restricted per tool the way `claude-code`
   is. The path gate and `persist-credentials: false` contain them, but they
   can run arbitrary shell commands inside the runner.
