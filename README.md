@@ -594,7 +594,7 @@ A few choices in this pipeline come from recent work on coding agents:
   way to cut cost
   ([routing and cascades survey, 2026](https://arxiv.org/abs/2603.04445)).
   In this pipeline only the coder's output is checked by execution (tests
-  and the write-scope gate), so only the coder gets a fast-first ladder.
+  write-scope gate and proofs), so only the coder gets a fast-first ladder.
   QA writes those checks; a weak QA means weak tests the coder passes
   trivially. Review has no check at all. Both stay on strong models, and
   review on a different family (above). In a local trial on three specs
