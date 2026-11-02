@@ -46,7 +46,7 @@ cat > "$WORK/agent.sh" <<'EOF'
 #!/usr/bin/env bash
 # Stand-in agent: does each stage's job. CHEAT=1 makes the coder edit the tests;
 # on model "fast" the coder writes a wrong mul (so the ladder has to escalate).
-echo "${FACTORY_LOCAL_MODEL:-default}" >> "$MODELS_SEEN"
+echo "${FACTORY_LOCAL_HARNESS}:${FACTORY_LOCAL_MODEL:-default}" >> "$MODELS_SEEN"
 case $1 in
   qa) printf '. src/calc.sh\n# AC-1\n[ "$(mul 2 3)" = 6 ]\n' > tests/test_mul.sh
       echo "- AC-1: negative numbers? (assumed any integers)" >> .factory/ambiguity-checklist.md ;;
@@ -81,10 +81,13 @@ STATUS=$?
 [ "$STATUS" != 0 ] && echo "$OUT" | grep -q "touched paths outside its write scope"; check "a coder that edits the tests is stopped" $?
 
 rm -f "$MODELS_SEEN"
-OUT=$(FACTORY_LOCAL_MODEL=reviewer FACTORY_LOCAL_CODER_MODELS=fast,strong FACTORY_AGENT_CMD="$WORK/agent.sh" bash .factory/factory.sh run "$WORK/spec.md" 2>&1)
+OUT=$(FACTORY_LOCAL_MODEL=claude:reviewer FACTORY_LOCAL_CODER_MODELS=claude:fast,codex:strong FACTORY_AGENT_CMD="$WORK/agent.sh" bash .factory/factory.sh run "$WORK/spec.md" 2>&1)
 STATUS=$?
-[ "$STATUS" = 0 ] && [ "$(paste -sd, - < "$MODELS_SEEN")" = reviewer,fast,strong,reviewer ] \
-  && echo "$OUT" | grep -q "Coder attempts: fast,strong"; check "a red fast attempt escalates to the strong model; other stages keep theirs" $?
+[ "$STATUS" = 0 ] && [ "$(paste -sd, - < "$MODELS_SEEN")" = claude:reviewer,claude:fast,codex:strong,claude:reviewer ] \
+  && echo "$OUT" | grep -q "Coder attempts: claude:fast,codex:strong"; check "a red fast attempt escalates to the next model (and harness); other stages keep theirs" $?
+WT=$(echo "$OUT" | sed -n 's/^  worktree  //p')
+[ "$(jq -s -c 'map([.stage, .attempt, .harness, .model])' "$WT.record/usage.jsonl")" = '[["qa",1,"claude","reviewer"],["coder",1,"claude","fast"],["coder",2,"codex","strong"],["review",1,"claude","reviewer"]]' ]
+check "every session is in the usage log with its harness and model" $?
 
 A=$(FACTORY_AGENT_CMD="$WORK/agent.sh" FACTORY_STAGES=qa bash .factory/factory.sh run "$WORK/spec.md" 2>&1 | sed -n 's/^  branch    //p')
 B=$(FACTORY_AGENT_CMD="$WORK/agent.sh" FACTORY_STAGES=qa bash .factory/factory.sh run "$WORK/spec.md" 2>&1 | sed -n 's/^  branch    //p')

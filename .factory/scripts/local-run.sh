@@ -10,14 +10,15 @@
 #   .factory/factory.sh run <issue-number>  a GitHub issue (needs gh)
 #
 # Options (env):
-#   FACTORY_LOCAL_HARNESS=claude|codex   which CLI (default: config harness / whatever is installed)
-#   FACTORY_LOCAL_MODEL=...              model override for that CLI
 #   FACTORY_STAGES=qa,coder,review       which stages to run (default all three)
-#   FACTORY_LOCAL_CODER_MODELS=a,b,...   model per coder attempt, e.g. "haiku,opus":
-#                                        a fast model first, a strong one if the
-#                                        suite is still red (the last one repeats;
-#                                        attempts = max(maxAttempts, list length)).
-#                                        Each attempt builds on the previous edits.
+#   FACTORY_LOCAL_HARNESS=claude|codex   default CLI (default: config harness / whatever is installed)
+#   FACTORY_LOCAL_MODEL=[cli:]model      one model for every stage
+#   FACTORY_LOCAL_<STAGE>_MODELS=a,b,..  a ladder for one stage, e.g.
+#                                        FACTORY_LOCAL_CODER_MODELS=claude:haiku,codex:gpt-5.5:
+#                                        attempt n uses entry n, the last repeats,
+#                                        attempts = max(maxAttempts, ladder length),
+#                                        and each attempt builds on the previous edits.
+#   (or "localModel" per stage in the config; see models.sh. "codex:" alone = Codex's default model)
 #
 # The run happens in a new git worktree on branch agent/local-<slug>-<time>,
 # created from your current commit, so your checkout is never touched. The run
@@ -136,19 +137,13 @@ if [[ "$STAGES" == *,coder,* ]]; then
   BASE=$(git rev-parse HEAD)
   bash "$S/prompt.sh" coder "$ISSUE_MD" "$REF" "$RUN/ambiguities-qa.md" > "$RUN/prompt-coder.base.md"
   cp "$RUN/prompt-coder.base.md" "$RUN/prompt-coder.md"
-  ATTEMPTS=$(bash "$S/run-agent.sh" --get coder maxAttempts 2>/dev/null || echo 2)
-  [ "$ATTEMPTS" != null ] && [ -n "$ATTEMPTS" ] || ATTEMPTS=2
-  IFS=, read -r -a LADDER <<< "${FACTORY_LOCAL_CODER_MODELS:-}"
-  [ "${#LADDER[@]}" -gt "$ATTEMPTS" ] && ATTEMPTS=${#LADDER[@]}
-  MODEL_BEFORE="${FACTORY_LOCAL_MODEL-}"
+  ATTEMPTS=$(bash "$S/local-agent.sh" --attempts coder)
   GREEN=false
   for i in $(seq 1 "$ATTEMPTS"); do
-    if [ "${#LADDER[@]}" -gt 0 ]; then
-      n=$(( i <= ${#LADDER[@]} ? i : ${#LADDER[@]} ))
-      export FACTORY_LOCAL_MODEL="${LADDER[$((n - 1))]}"
-    fi
-    echo "-- attempt $i of $ATTEMPTS${FACTORY_LOCAL_MODEL:+ ($FACTORY_LOCAL_MODEL)}"
-    echo "$i ${FACTORY_LOCAL_MODEL:-default}" >> "$RUN/coder-attempts.txt"
+    export FACTORY_ATTEMPT=$i
+    { IFS= read -r H; IFS= read -r M; } < <(bash "$S/local-agent.sh" --pick coder "$i")
+    echo "-- attempt $i of $ATTEMPTS ($H${M:+ $M})"
+    echo "$i $H:${M:-default}" >> "$RUN/coder-attempts.txt"
     agent coder "$RUN/prompt-coder.md" "Read,Write,Edit,Glob,Grep,$TEST_TOOL$PROOF_TOOLS,Bash(git status*),Bash(git diff*),Bash(git log*)" || true
     if bash "$S/product.sh" test > "$RUN/test-output.txt" 2>&1 && bash "$S/proofs.sh" >> "$RUN/test-output.txt" 2>&1; then
       GREEN=true; echo "Green after attempt $i."; break
@@ -156,7 +151,7 @@ if [[ "$STAGES" == *,coder,* ]]; then
     echo "Still red after attempt $i."
     [ "$i" -lt "$ATTEMPTS" ] && bash "$S/prompt.sh" coder-retry "$RUN/prompt-coder.base.md" "$RUN/test-output.txt" "$i" > "$RUN/prompt-coder.md"
   done
-  [ "${#LADDER[@]}" -gt 0 ] && export FACTORY_LOCAL_MODEL="$MODEL_BEFORE"
+  unset FACTORY_ATTEMPT
   $GREEN || { tail -c 4000 "$RUN/test-output.txt"; die "Suite still red after $ATTEMPTS coder attempt(s)."; }
   say "Coder gates"
   bash "$S/check-paths.sh" coder "$BASE" "$RUN" || die "The coder failed the write-scope gate."
@@ -196,7 +191,10 @@ fi
 say "Done"
 echo "Branch $BRANCH, in $WT"
 [ -s "$RUN/coder-attempts.txt" ] && echo "Coder attempts: $(awk '{print $2}' "$RUN/coder-attempts.txt" | paste -sd, -)"
-[ -s "$FACTORY_USAGE_LOG" ] && echo "Compute: $(jq -s '[.[].turns // 0] | add' "$FACTORY_USAGE_LOG") turns, ~\$$(jq -s '[.[].listCostUsd // 0] | add * 100 | round / 100' "$FACTORY_USAGE_LOG") at list price (not billed on a subscription)"
+[ -s "$FACTORY_USAGE_LOG" ] && echo "Compute: $(jq -rs '
+  "\([.[].turns // 0] | add) turns, \(([.[] | (.inputTokens // 0) + (.outputTokens // 0)] | add) / 1000 | round)k tokens"
+  + (if any(.[]; .costUsd != null) then ", ~$\([.[].costUsd // 0] | add * 100 | round / 100) at list price (not billed on a subscription)" else "" end)
+  + (if any(.[]; .costUsd == null) then " (some harnesses report no cost)" else "" end)' "$FACTORY_USAGE_LOG")"
 [ -n "$PASS" ] && echo "Rubric: $(jq -r '.overall' "$RUN/review-score.json") / 100 ($( [ "$PASS" = true ] && echo PASS || echo FAIL ))"
 [ -s "$RUN/ambiguities-qa.md" ] || [ -s "$RUN/ambiguities-coder.md" ] && {
   echo; echo "Open questions the agents recorded:"; cat "$RUN"/ambiguities-*.md 2>/dev/null; }
