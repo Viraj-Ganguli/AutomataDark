@@ -296,32 +296,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          {
-            cat .factory/qa.nlspec.md
-            echo
-            echo "---"
-            echo
-            echo "## GitHub issue #$ISSUE_NUMBER"
-            echo
-            gh issue view "$ISSUE_NUMBER" --json title,body --jq '"# " + .title + "\n\n" + .body'
-            echo
-            echo "---"
-            echo
-            echo "The shared, read-only test harness lives under: $(jq -r '.paths.protected | map("`" + . + "`") | join(", ")' "$ORCHESTRATOR_CONFIG"). Read its README, if it has one, for the interface."
-            echo
-            echo "---"
-            echo
-            bash "$FACTORY_SCRIPTS"/check-paths.sh --describe qa
-            echo
-            echo "---"
-            echo
-            echo "## Action required"
-            echo
-            echo "Write the failing tests for issue #$ISSUE_NUMBER right now."
-            echo "Use your Write or Edit tools to create test file(s) inside your write scope."
-            echo "Do NOT describe what you will do — call the tools and write the files."
-            echo "When done, run \`$TEST_CMD\` to confirm the new tests fail for the right reason."
-          } > "$RUNNER_TEMP/qa-prompt.md"
+          gh issue view "$ISSUE_NUMBER" --json title,body --jq '"# " + .title + "\n\n" + .body' > "$RUNNER_TEMP/issue.md"
+          bash "$FACTORY_SCRIPTS"/prompt.sh qa "$RUNNER_TEMP/issue.md" "#$ISSUE_NUMBER" > "$RUNNER_TEMP/qa-prompt.md"
 
       - name: Run QA agent
         timeout-minutes: 20
@@ -455,42 +431,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          {
-            cat .factory/coder.nlspec.md
-            echo
-            echo "---"
-            echo
-            bash "$FACTORY_SCRIPTS"/check-paths.sh --describe coder
-            echo
-            echo "---"
-            if [ -s "$RUNNER_TEMP/qa-record/ambiguities-qa.md" ]; then
-              echo
-              echo "## Open questions the QA agent recorded"
-              echo
-              echo "These are unresolved. Don't guess past them silently; if one blocks you, append to the checklist too."
-              echo
-              cat "$RUNNER_TEMP/qa-record/ambiguities-qa.md"
-              echo
-              echo "---"
-            fi
-            echo
-            echo "## GitHub issue #$ISSUE_NUMBER"
-            echo
-            gh issue view "$ISSUE_NUMBER" --json title,body --jq '"# " + .title + "\n\n" + .body'
-            echo
-            echo "---"
-            echo
-            echo "## Failing tests"
-            echo
-            echo "The QA agent already committed failing tests. Run \`$TEST_CMD\` to see the current failures, then iterate (read -> edit -> re-run) until it exits 0. Do not edit the tests or anything else outside your write scope."
-            echo
-            echo "---"
-            echo
-            echo "## Action required"
-            echo
-            echo "Start now: run \`$TEST_CMD\`, read the failures, edit the application source, and repeat until green."
-            echo "Do NOT describe what you will do — call the tools and fix the code."
-          } > "$RUNNER_TEMP/coder-prompt.base.md"
+          gh issue view "$ISSUE_NUMBER" --json title,body --jq '"# " + .title + "\n\n" + .body' > "$RUNNER_TEMP/issue.md"
+          bash "$FACTORY_SCRIPTS"/prompt.sh coder "$RUNNER_TEMP/issue.md" "#$ISSUE_NUMBER" \
+            "$RUNNER_TEMP/qa-record/ambiguities-qa.md" > "$RUNNER_TEMP/coder-prompt.base.md"
 
       - name: Run coder agent (with repair attempts)
         timeout-minutes: 45
@@ -520,21 +463,8 @@ jobs:
             echo "Suite still red after attempt $i."
 
             if [ "$i" -lt "$ATTEMPTS" ]; then
-              {
-                cat "$RUNNER_TEMP/coder-prompt.base.md"
-                echo
-                echo "---"
-                echo
-                echo "## Previous attempt $i left the suite red"
-                echo
-                echo "Your earlier edits are still in the working tree. This is the tail of \`$TEST_CMD\`:"
-                echo
-                echo '```'
-                tail -c 8000 "$RUNNER_TEMP/test-output.txt"
-                echo '```'
-                echo
-                echo "Fix the remaining failures in application code. Do not edit the tests; if a test is unsatisfiable, record it in .factory/ambiguity-checklist.md."
-              } > "$PROMPT"
+              bash "$FACTORY_SCRIPTS"/prompt.sh coder-retry "$RUNNER_TEMP/coder-prompt.base.md" \
+                "$RUNNER_TEMP/test-output.txt" "$i" > "$PROMPT"
             fi
           done
           tail -c 8000 "$RUNNER_TEMP/test-output.txt"
@@ -668,59 +598,8 @@ jobs:
           ISSUE_NUMBER: ${{ needs.guard.outputs.issue_number }}
         run: |
           set -euo pipefail
-          DIFF_LIMIT=80000
-          {
-            echo "# Review agent"
-            echo
-            echo "Score the cumulative diff for issue #$ISSUE_NUMBER (changes since"
-            echo "main, listed and shown below) against every criterion in the rubric"
-            echo "below. For each criterion, give an integer score from 0 to 100 and a one-sentence"
-            echo "comment justifying it."
-            echo
-            echo "When done, write your results to \`.factory/review-result.json\`"
-            echo "(create it -- it does not exist yet) with exactly this shape:"
-            echo
-            echo '```json'
-            echo '{'
-            echo '  "criteria": {'
-            echo '    "<criterion-id>": { "score": 0-100, "comment": "..." },'
-            echo '    "...": { "score": 0-100, "comment": "..." }'
-            echo '  }'
-            echo '}'
-            echo '```'
-            echo
-            echo "Include every criterion id from the rubric's dimensions[].criteria[].id."
-            echo "Do not create, edit, or delete any other file -- in particular, never"
-            echo "modify any test or anything under the protected paths."
-            echo
-            echo "---"
-            echo
-            echo "## Rubric (.factory/rubric.json)"
-            echo
-            echo '```json'
-            cat .factory/rubric.json
-            echo '```'
-            echo
-            echo "---"
-            echo
-            echo "## Changed files (vs main)"
-            echo
-            echo '```'
-            cat "$RUNNER_TEMP/changed-files.txt"
-            echo '```'
-            echo
-            echo "---"
-            echo
-            echo "## Full diff (vs main, lockfiles excluded)"
-            echo
-            echo '```diff'
-            head -c "$DIFF_LIMIT" "$RUNNER_TEMP/full-diff.txt"
-            echo '```'
-            if [ "$(wc -c < "$RUNNER_TEMP/full-diff.txt")" -gt "$DIFF_LIMIT" ]; then
-              echo
-              echo "The diff above is truncated at $DIFF_LIMIT bytes. Run \`git diff origin/main...HEAD -- <file>\` for the files it doesn't cover before scoring."
-            fi
-          } > "$RUNNER_TEMP/review-prompt.md"
+          bash "$FACTORY_SCRIPTS"/prompt.sh review "#$ISSUE_NUMBER" "$RUNNER_TEMP/changed-files.txt" \
+            "$RUNNER_TEMP/full-diff.txt" origin/main > "$RUNNER_TEMP/review-prompt.md"
 
       - name: Run review agent
         timeout-minutes: 15

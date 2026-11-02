@@ -2,6 +2,9 @@
 #
 # factory.sh -- entry point for working on the factory locally.
 #
+#   .factory/factory.sh run <nlspec.md | issue#>
+#                                run the whole pipeline locally on your Claude Code
+#                                or Codex subscription (no OpenRouter, no API keys)
 #   .factory/factory.sh setup    one-time GitHub setup (idempotent)
 #   .factory/factory.sh check    report setup status; changes nothing
 #   .factory/factory.sh config   show what each stage resolves to
@@ -10,7 +13,8 @@
 #   .factory/factory.sh test     end-to-end gate tests
 #   .factory/factory.sh verify   build + every conformance and gate test (what CI runs)
 #
-# Needs: bash, git, jq; gh + curl + openssl for setup; elan (Lean) for build/test/verify.
+# Needs: bash, git, jq; claude or codex for run; gh + curl + openssl for setup;
+# elan (Lean) for run/build/test/verify.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -18,6 +22,7 @@ S=.factory/scripts
 LAKE=$(command -v lake || echo "$HOME/.elan/bin/lake")
 
 case "${1:-}" in
+  run) shift; bash "$S/local-run.sh" "$@" ;;
   setup) bash "$S/setup.sh" ;;
   check) bash "$S/setup.sh" --check ;;
   config) for s in qa coder review; do bash "$S/run-agent.sh" --resolve "$s"; done ;;
@@ -25,5 +30,5 @@ case "${1:-}" in
   build) (cd .factory/lean && "$LAKE" build) ;;
   test) (cd .factory/lean && "$LAKE" build) && bash "$S/tests/gates.test.sh" ;;
   verify) bash .factory/lean/scripts/run-all.sh ;;
-  *) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

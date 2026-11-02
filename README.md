@@ -16,6 +16,10 @@ any harness (Claude Code, opencode, Codex) and any
   binary whose decision functions are machine-checked
   ([Verified gates](#verified-gates-lean-4)). The CI build fails if any
   proof breaks.
+- **Runs on your subscription.** `.factory/factory.sh run my-feature.md`
+  runs the whole pipeline locally through the Claude Code or Codex CLI you're
+  logged into, with no API keys ([Run it locally](#run-it-locally-on-your-subscription)).
+  The same pipeline runs in GitHub Actions on OpenRouter when you want it hands-off.
 - **Factory only.** This repository holds just the factory (`.factory/`,
   `.github/`). The product it builds lives in your repo, next to a copy of
   it. **To get started, run `.factory/factory.sh setup`.**
@@ -134,6 +138,59 @@ Core Lean only, no Mathlib; the toolchain is pinned in
 `.factory/lean/lean-toolchain`. See [`.factory/lean/README.md`](.factory/lean/README.md)
 for the theorem list, how proofs are tied to the shipped code, and what the
 proofs don't cover.
+
+## Run it locally on your subscription
+
+The quickest way to try the factory, and the cheapest: run the whole
+QA → Coder → Review pipeline on your machine with the Claude Code or Codex
+CLI you're already logged into. No GitHub Actions, no OpenRouter, no API
+keys, no extra spend. The prompts and gates are the same as in CI.
+
+```bash
+# once: log in with your subscription, and install elan for the gates
+claude auth login            # Claude Pro/Max   (or: codex login, with ChatGPT)
+curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh
+
+# fill in "product" in .factory/orchestrator.config.json, then:
+.factory/factory.sh run my-feature.md      # an NLSpec: "# Title" + the issue template's sections
+.factory/factory.sh run 12                 # or a GitHub issue number (needs gh)
+```
+
+- **Which CLI:** the config's `harness` if it's `claude-code` or `codex`,
+  otherwise whichever is installed. Override with
+  `FACTORY_LOCAL_HARNESS=claude|codex` and `FACTORY_LOCAL_MODEL=opus` (or any
+  model your CLI accepts).
+- **No surprise bills:** API-key variables (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, …) are removed from the agent's environment, and the run
+  refuses to start unless the CLI reports a subscription login (Claude Code:
+  `claude.ai`; Codex: ChatGPT).
+- **Your checkout is never touched:** each run works in a new git worktree on
+  branch `agent/local-<slug>-<time>`, next to your repo in
+  `<repo>-agent-runs/`, starting from your last commit. Prompts, agent output,
+  open questions, and the rubric report go in `<worktree>.record/`. Nothing is
+  pushed. The summary prints the commands to look at the result, open a PR,
+  or throw the run away.
+- **Same gates as CI:** write scope after each stage, red for the right reason,
+  green tests, a clean tree after review,
+  and the exact rubric score. The rules are snapshotted before any agent
+  runs, as in CI.
+- Run part of the pipeline with `FACTORY_STAGES=qa` or `FACTORY_STAGES=qa,coder`.
+- **Fast coder, strong fallback:** `FACTORY_LOCAL_CODER_MODELS=haiku,opus`
+  runs the coder's first attempt on a fast model and, only if the suite is
+  still red, the next attempt on a strong one (the last name repeats). The
+  coder is the one stage whose work is checked by execution (tests and
+  gates), so a fast model there is safe; QA writes those checks and review
+  has none, so they keep `FACTORY_LOCAL_MODEL`. Names are the CLI's own
+  (`haiku` is a Claude Code alias; Codex takes its model names).
+- **What a run used:** with Claude Code, `<worktree>.record/usage.jsonl` has
+  one line per agent session (turns, seconds, and the per-model list-price
+  cost the CLI reports; not billed on a subscription, but a fair measure of
+  quota used), and the summary prints the total. Your own
+  `~/.claude/settings.json` applies, so an `advisorModel` there lets a fast
+  coder consult that model, which shows up in `usage.jsonl`.
+
+Subscription plans have usage limits rather than per-token costs; a run
+uses roughly what doing the same work interactively would.
 
 ## Agent orchestrator
 
