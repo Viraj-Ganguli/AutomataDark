@@ -17,7 +17,8 @@ model answer is possible, so the theorems hold however the agents behave.
 The main results:
 
 * `pr_requires_gates`: a PR is opened only if the QA path gate and red check,
-  the coder path gate and tests, and the review clean-tree check all passed.
+  the coder path gate, tests, and proof obligations, and the review
+  clean-tree check all passed.
 * `push_requires_gate`: each push to the agent branch follows that stage's
   path gate. With `PathGate.accept_no_protected`, no commit on the branch
   changes `tests/golden/`.
@@ -46,6 +47,7 @@ structure Inputs where
   coderAgentOk : Bool
   coderTestsOk : Bool     -- npm test, after up to maxAttempts tries
   coderPathsOk : Bool     -- check-paths.sh coder
+  coderProofsOk : Bool    -- proofs.sh: proof obligations (passes if product.proofs is unset)
   reviewAgentOk : Bool
   reviewTreeClean : Bool  -- "Enforce review write-scope"
   rubricPass : Bool       -- `factory score` `pass`
@@ -87,7 +89,7 @@ def run (i : Inputs) : Run :=
   let qa := gated [guard, mintKey, setup] true (i.qaAgentOk && i.qaPathsOk && i.qaRedOk)
   let coderRuns := gated [guard, mintKey, setup, qa] true true == .success
   let coder := gated [guard, mintKey, setup, qa] true
-    (i.coderAgentOk && i.coderTestsOk && i.coderPathsOk)
+    (i.coderAgentOk && i.coderTestsOk && i.coderPathsOk && i.coderProofsOk)
   let review := gated [guard, mintKey, setup, qa, coder] true (i.reviewAgentOk && i.reviewTreeClean)
   let prRuns := gated [guard, setup, qa, coder, review] true true == .success
   let pr := gated [guard, setup, qa, coder, review] true i.prOk
@@ -98,7 +100,7 @@ def run (i : Inputs) : Run :=
   { guard, mintKey, setup, qa, coder, review, pr, reportFailure,
     revokeKey := runIf keyHash i.revokeOk
     qaPushed := qaRuns && i.qaAgentOk && i.qaPathsOk && i.qaRedOk
-    coderPushed := coderRuns && i.coderAgentOk && i.coderTestsOk && i.coderPathsOk
+    coderPushed := coderRuns && i.coderAgentOk && i.coderTestsOk && i.coderPathsOk && i.coderProofsOk
     merged := prRuns && i.autoMerge && i.rubricPass }
 
 /-- The YAML shape the model assumes: job, `needs:`, `if:`. -/
@@ -138,7 +140,7 @@ the pr job *runs*, not only when it succeeds: the PR exists from the
 `gh pr create` step on, even if a later step fails. -/
 theorem pr_requires_gates (i : Inputs) (h : (run i).pr ≠ .skipped) :
     i.proceed ∧ i.qaPathsOk ∧ i.qaRedOk ∧ i.coderTestsOk ∧ i.coderPathsOk ∧
-      i.reviewTreeClean := by
+      i.coderProofsOk ∧ i.reviewTreeClean := by
   simp only [run, gated_ne_skipped, gated_success, List.mem_cons, List.not_mem_nil, or_false,
     forall_eq_or_imp, forall_eq, Bool.and_eq_true] at h
   simp_all
@@ -147,7 +149,7 @@ theorem pr_requires_gates (i : Inputs) (h : (run i).pr ≠ .skipped) :
 passed (for the coder, after QA's had passed too). -/
 theorem push_requires_gate (i : Inputs) :
     ((run i).qaPushed → i.qaPathsOk ∧ i.qaRedOk) ∧
-    ((run i).coderPushed → i.coderPathsOk ∧ i.coderTestsOk ∧ i.qaPathsOk) := by
+    ((run i).coderPushed → i.coderPathsOk ∧ i.coderTestsOk ∧ i.coderProofsOk ∧ i.qaPathsOk) := by
   constructor
   · intro h
     simp only [run, Bool.and_eq_true] at h
@@ -159,7 +161,8 @@ theorem push_requires_gate (i : Inputs) :
 
 /-- Auto-merge needs both the config flag and a passing rubric, on top of every gate. -/
 theorem merge_requires_pass (i : Inputs) (h : (run i).merged) :
-    i.autoMerge ∧ i.rubricPass ∧ i.qaPathsOk ∧ i.coderPathsOk ∧ i.reviewTreeClean := by
+    i.autoMerge ∧ i.rubricPass ∧ i.qaPathsOk ∧ i.coderPathsOk ∧ i.coderProofsOk ∧
+      i.reviewTreeClean := by
   simp only [run, Bool.and_eq_true, gated_true_success, gated_success, List.mem_cons,
     List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq] at h
   simp_all

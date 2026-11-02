@@ -88,6 +88,7 @@ Everything product-specific is in the `product` block of
 | `test` | The suite. Its exit status is the verdict for the coder and review stages. Keep it one command with no commas: it also becomes the agents' shell permission (`Bash(pytest*)`). |
 | `testReport` | The same suite, writing a JUnit XML report to `$FACTORY_JUNIT`. `factory red` reads it to decide whether QA's tests are red for the right reason (`strictRedCheck`). Each test case needs a file attribute (see below). |
 | `env` | Extra environment variables for every product command. |
+| `proofs` | Optional: a Lean package with proof obligations the coder must meet, e.g. an optimized query path proved equal to its model, the pattern behind the [Lean entry](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/153) to the $12 server challenge. See [Proof obligations](.factory/lean/README.md#proof-obligations) and [`examples/feed`](.factory/lean/examples/feed). |
 
 | Stack | `test` | `testReport` |
 | --- | --- | --- |
@@ -124,6 +125,7 @@ very functions the binary runs, not a model of some other implementation.
 | Write scope | `factory paths <stage>` (via `check-paths.sh`) | An accepted change touches only allowed, unprotected paths; a rename out of a protected directory is rejected (both of its paths are checked). |
 | Red check | `factory red <junit.xml> <changed.txt>` | Accepted ⇒ some test in a file QA changed fails on an assertion, nothing errored, no test outside QA's files fails, and every test is attributed to a file. |
 | Rubric | `factory score <rubric> <review> <out>` | For *any* review output — forged, negative, huge, or non-numeric scores — the overall stays ≤ 100; raising a score never lowers it; on the current rubric, no single criterion can pass a review alone. Weights and threshold are read as exact decimals; there is no floating point. |
+| Product proofs (optional) | `.factory/scripts/proofs.sh` | When `product.proofs` is set, the coder must also prove the product's human-approved obligations. The gate rejects `sorry`, extra axioms, `native_decide`, weakened or shadowed statements, and `@[implemented_by]` swaps, and rebuilds from source. See [Proof obligations](.factory/lean/README.md#proof-obligations). |
 | Pipeline | `factory workflow <orchestrator.yml>` | A PR exists only after every gate passed; every push follows its stage's path gate; auto-merge needs `autoMerge` *and* a passing rubric; a minted key is always revoked; a failed run always reports on its issue. The command fails if the YAML drifts from the model these are proved about. |
 
 ```bash
@@ -177,7 +179,7 @@ curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
   pushed. The summary prints the commands to look at the result, open a PR,
   or throw the run away.
 - **Same gates as CI:** write scope after each stage, red for the right reason,
-  green tests, a clean tree after review,
+  green tests, proof obligations if configured, a clean tree after review,
   and the exact rubric score. The rules are snapshotted before any agent
   runs, as in CI.
 - Run part of the pipeline with `FACTORY_STAGES=qa` or `FACTORY_STAGES=qa,coder`.
@@ -186,7 +188,7 @@ curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
   `...,codex:gpt-5.5`) runs the coder's first attempt on a fast model and,
   only if the suite is still red, the next on a strong one (the last entry
   repeats). The coder is the one stage whose work is checked by execution
-  (tests and gates), so a fast model there is safe; QA writes those checks
+  (tests, gates, proofs), so a fast model there is safe; QA writes those checks
   and review has none, so keep them strong. CI takes the same ladder as a
   `model` list ([Plug in any model or harness](#plug-in-any-model-or-harness)).
 - **What a run used:** `<worktree>.record/usage.jsonl` has one line per
@@ -355,7 +357,7 @@ flowchart TD
 | `maxAttempts` | How many times a stage runs with the previous failures fed back. Used by `coder` (default `2`). |
 | `stages.<qa\|coder\|review>` | Per-stage overrides for any key above. |
 | `product` | The product's `setup`, `test`, and `testReport` commands and `env`. See [Plug in your product](#plug-in-your-product). |
-| `paths` | The factory/product boundary: `protected`, plus the prefixes each stage may write (`qa`, `coder`). Each must end in `/`. See [Factory vs. product](#factory-vs-product). |
+| `paths` | The factory/product boundary: `protected`, plus what each stage may write (`qa`, `coder`). Each entry is a directory ending in `/` or an exact file path. See [Factory vs. product](#factory-vs-product). |
 | `label` | Issue label that triggers a run (default `build`). |
 | `autoMerge` | `true` = squash-merge when the rubric passes. Default `false` (human-gated). |
 | `strictRedCheck` | QA "red for the right reason" gate, from the JUnit report (`product.testReport`). Set `false` if your runner can't write JUnit XML. |
@@ -591,8 +593,8 @@ A few choices in this pipeline come from recent work on coding agents:
   cascades that move up to a bigger model only on failure are a standard
   way to cut cost
   ([routing and cascades survey, 2026](https://arxiv.org/abs/2603.04445)).
-  In this pipeline only the coder's output is checked by execution (tests
-  and the write-scope gate), so only the coder gets a fast-first ladder.
+  In this pipeline only the coder's output is checked by execution (tests,
+  the write-scope gate and proofs), so only the coder gets a fast-first ladder.
   QA writes those checks; a weak QA means weak tests the coder passes
   trivially. Review has no check at all. Both stay on strong models, and
   review on a different family (above). In a local trial on three specs
@@ -641,8 +643,8 @@ A few choices in this pipeline come from recent work on coding agents:
   the report. The proofs say the gates decide correctly *given* their inputs;
   the rubric's `architecture.test-isolation` criterion and the human
   gatekeeper cover the rest. Keeping test configuration inside a protected
-  directory closes most of this. Protected entries are directories, so a
-  single root file such as `package.json` can't be protected yet.
+  directory, or listing files like `package.json` in `paths.protected` (exact
+  file entries are supported), closes most of this.
 - Job logs show raw agent output (stream-JSON for claude-code/opencode).
   It's noisy, but it's the actual tool-call trace. The same output, plus the
   exact prompts, is saved in the `run-<stage>` artifacts. Each run's job

@@ -2,7 +2,7 @@
 #
 # local-run.sh -- run the whole QA -> Coder -> Review pipeline on your machine,
 # on your Claude Code or Codex subscription. Same prompts (prompt.sh), same
-# gates (path gate, red check, tests, rubric score) as the
+# gates (path gate, red check, tests, proof obligations, rubric score) as the
 # orchestrator in CI; no GitHub Actions, no OpenRouter, no API keys.
 #
 # Usage (from the product repo):
@@ -57,7 +57,7 @@ fi
 # Snapshot the rules before any agent runs, exactly like CI: editing the
 # scripts, config, or gates in the worktree can't change how the run is judged.
 SNAP=$(mktemp -d)
-cp "$SRC"/*.sh .factory/orchestrator.config.json "$SNAP/"
+cp "$SRC"/*.sh "$SRC"/*.lean .factory/lean/lean-toolchain .factory/orchestrator.config.json "$SNAP/"
 cp "$FACTORY_BIN" "$SNAP/factory"
 export FACTORY_BIN="$SNAP/factory" ORCHESTRATOR_CONFIG="$SNAP/orchestrator.config.json"
 S="$SNAP"
@@ -93,6 +93,7 @@ cd "$WT"
 export FACTORY_JUNIT="$RUN/junit.xml" FACTORY_USAGE_LOG="$RUN/usage.jsonl"
 TEST_CMD=$(bash "$S/product.sh" show test); export TEST_CMD
 TEST_TOOL=$(bash "$S/product.sh" tool-pattern)
+PROOF_TOOLS=""; [ -n "$(jq -r '.product.proofs // ""' "$ORCHESTRATOR_CONFIG")" ] && PROOF_TOOLS=",Bash(lake build*)"
 GIT=(git -c core.hooksPath=/dev/null -c user.name="factory (local)" -c user.email="factory@localhost")
 
 echo "Run: $REF"
@@ -143,8 +144,8 @@ if [[ "$STAGES" == *,coder,* ]]; then
     { IFS= read -r H; IFS= read -r M; } < <(bash "$S/local-agent.sh" --pick coder "$i")
     echo "-- attempt $i of $ATTEMPTS ($H${M:+ $M})"
     echo "$i $H:${M:-default}" >> "$RUN/coder-attempts.txt"
-    agent coder "$RUN/prompt-coder.md" "Read,Write,Edit,Glob,Grep,$TEST_TOOL,Bash(git status*),Bash(git diff*),Bash(git log*)" || true
-    if bash "$S/product.sh" test > "$RUN/test-output.txt" 2>&1; then
+    agent coder "$RUN/prompt-coder.md" "Read,Write,Edit,Glob,Grep,$TEST_TOOL$PROOF_TOOLS,Bash(git status*),Bash(git diff*),Bash(git log*)" || true
+    if bash "$S/product.sh" test > "$RUN/test-output.txt" 2>&1 && bash "$S/proofs.sh" >> "$RUN/test-output.txt" 2>&1; then
       GREEN=true; echo "Green after attempt $i."; break
     fi
     echo "Still red after attempt $i."
@@ -155,6 +156,7 @@ if [[ "$STAGES" == *,coder,* ]]; then
   say "Coder gates"
   bash "$S/check-paths.sh" coder "$BASE" "$RUN" || die "The coder failed the write-scope gate."
   bash "$S/product.sh" test >/dev/null 2>&1 || die "The suite isn't green."
+  bash "$S/proofs.sh" || die "Proof obligations not met."
   "${GIT[@]}" commit -q -m "feat: implement $REF (coder agent, local)"
   echo "Committed the implementation."
 fi

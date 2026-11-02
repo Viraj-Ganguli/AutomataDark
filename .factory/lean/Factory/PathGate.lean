@@ -46,19 +46,23 @@ structure Scope where
   protect : List String
   deriving Repr
 
-/-- A prefix must name a directory. Without the trailing `/`, an allowed
-`server` would also allow `server-evil/`. `factory paths` refuses a config
-that breaks this. -/
-def validPrefix (p : String) : Bool := p.endsWith "/" && p != "/"
+/-- A scope entry is either a directory, ending in `/`, which covers every
+path under it, or an exact file path. Entries are never bare prefixes: an
+allowed `server` must not also allow `server-evil/`. `factory paths` refuses
+an empty entry or `/`. -/
+def validEntry (p : String) : Bool := p != "" && p != "/" && !p.startsWith "/"
 
-def Scope.valid (s : Scope) : Bool := !s.allowed.isEmpty && (s.allowed ++ s.protect).all validPrefix
+/-- Does entry `p` cover path `f`? -/
+def covers (p f : String) : Bool := if p.endsWith "/" then f.startsWith p else f == p
+
+def Scope.valid (s : Scope) : Bool := !s.allowed.isEmpty && (s.allowed ++ s.protect).all validEntry
 
 /-- The run-notes file. Its changes are harvested into the run record and
 reverted, so the gate does not count them. -/
 def notes : String := ".factory/ambiguity-checklist.md"
 
-def underAny (prefixes : List String) (f : String) : Bool :=
-  prefixes.any (fun p => f.startsWith p)
+def underAny (entries : List String) (f : String) : Bool :=
+  entries.any (fun p => covers p f)
 
 /-- A path is fine if some allowed prefix covers it and no protected prefix does. -/
 def pathOk (s : Scope) (f : String) : Bool :=
@@ -81,7 +85,7 @@ theorem acceptPaths_sound {s : Scope} {changed : List String}
 
 theorem acceptPaths_no_protected {s : Scope} {changed : List String}
     (h : acceptPaths s changed = true) {f : String} (hf : f ∈ changed)
-    {p : String} (hp : p ∈ s.protect) : f.startsWith p = false := by
+    {p : String} (hp : p ∈ s.protect) : covers p f = false := by
   have h' := acceptPaths_sound h hf
   simp only [pathOk, underAny, Bool.and_eq_true, Bool.not_eq_true',
     List.any_eq_false] at h'
@@ -114,13 +118,13 @@ theorem accept_sound {s : Scope} {ops : List Op} (h : accept s ops = true)
 adding, or deleting it, and not as either side of a rename. -/
 theorem accept_no_protected {s : Scope} {ops : List Op} (h : accept s ops = true)
     {op : Op} (hop : op ∈ ops) {f : String} (hf : f ∈ op.touched) (hn : f ≠ notes)
-    {p : String} (hp : p ∈ s.protect) : f.startsWith p = false :=
+    {p : String} (hp : p ∈ s.protect) : covers p f = false :=
   acceptPaths_no_protected h (mem_changed hop hf hn) hp
 
 /-- In particular, moving a file out of a protected prefix is rejected. -/
 theorem rename_out_rejected {s : Scope} {ops : List Op} {src dst p : String}
     (hop : Op.rename src dst ∈ ops) (hp : p ∈ s.protect)
-    (hsrc : src.startsWith p = true) (hn : src ≠ notes) :
+    (hsrc : covers p src = true) (hn : src ≠ notes) :
     accept s ops = false := by
   cases h : accept s ops with
   | false => rfl
@@ -146,15 +150,16 @@ def Op.reportedNameOnly : Op → List String
 def acceptNameOnly (s : Scope) (ops : List Op) : Bool :=
   acceptPaths s ((ops.flatMap Op.reportedNameOnly).filter (· != notes))
 
-/-- The QA scope from `orchestrator.config.json`. -/
-def qaScope : Scope := { allowed := ["tests/"], protect := ["tests/golden/"] }
-
-/-- Checked with `native_decide` (`String.startsWith` does not reduce in the
-kernel), so this one example trusts the compiler. The general theorems above
-don't. -/
-theorem nameOnly_unsound :
-    acceptNameOnly qaScope [.rename "tests/golden/app.js" "tests/app.js"] = true ∧
-    accept qaScope [.rename "tests/golden/app.js" "tests/app.js"] = false := by
-  native_decide
+/-- Reporting renames by destination only is unsound: whenever a protected
+file is moved to an allowed, unprotected path, the name-only gate accepts
+the move and the real gate rejects it. Proved for every scope and every such
+pair of paths, so no evaluation (and no trust in the compiler) is needed. -/
+theorem nameOnly_unsound {s : Scope} {src dst p : String}
+    (hp : p ∈ s.protect) (hsrc : covers p src = true) (hsn : src ≠ notes)
+    (hdst : pathOk s dst = true) (hdn : dst ≠ notes) :
+    acceptNameOnly s [.rename src dst] = true ∧ accept s [.rename src dst] = false := by
+  refine ⟨?_, rename_out_rejected (dst := dst) (by simp) hp hsrc hsn⟩
+  have : (dst != notes) = true := by simpa using hdn
+  simp [acceptNameOnly, acceptPaths, Op.reportedNameOnly, List.filter, this, hdst]
 
 end Factory.PathGate

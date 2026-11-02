@@ -48,6 +48,18 @@ CI enforces it: the job fails if you touch anything else.
   requires a change there (root-level config, CI, the test setup), record it
   as an ambiguity instead.
 
+## Proof obligations (if the product has them)
+
+If the prompt includes a **Proof obligations** section, the product also has
+a Lean proofs package. Its `Spec/` (the model, the invariants, and the
+obligations) is human-approved and read-only. Implement each constant that
+`Spec/obligations.json` names under `Impl/`, and prove each obligation as a
+theorem with exactly the listed name and statement. Run `lake build` in the
+package to check. Never use `sorry`, `axiom`, `native_decide`,
+`@[implemented_by]`, or `@[extern]`: CI rejects all of them. If an obligation
+seems false as stated, record it in `.factory/ambiguity-checklist.md` rather
+than working around it.
+
 ## Required workflow (loop until green)
 
 1. **Run the test suite** (the test command named at the end of this

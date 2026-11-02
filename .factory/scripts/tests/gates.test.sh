@@ -76,7 +76,7 @@ expect "coder edits server/ and writes run notes" 0 "$(gate coder)"
 
 new_repo '{"protected":["tests/golden/"],"qa":["tests"],"coder":["server/"]}'
 mkdir -p tests-evil && echo x > tests-evil/a.js
-expect "prefix without trailing slash is refused" nonzero "$(gate qa)"
+expect "entry without a trailing slash covers only that exact file" nonzero "$(gate qa)"
 
 new_repo "$CFG"; echo "k=sk-or-v1-$(printf 'a%.0s' {1..32})" >> tests/x.test.js
 expect "qa adds an OpenRouter-shaped key" nonzero "$(gate qa)"

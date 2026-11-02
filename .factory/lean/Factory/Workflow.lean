@@ -81,7 +81,8 @@ def stepRules : List (String × List (String × String) × String) :=
             ("Run test suite (expect red, for the right reason)", "factory red ")],
       "Commit and push QA tests"),
     ("coder", [("Enforce coder write scope (factory/product boundary)", "check-paths.sh coder \""),
-               ("Run test suite (must be green)", "product.sh test")],
+               ("Run test suite (must be green)", "product.sh test"),
+               ("Check proof obligations", "proofs.sh")],
       "Commit and push coder changes") ]
 
 def check (yml : String) : List String := Id.run do

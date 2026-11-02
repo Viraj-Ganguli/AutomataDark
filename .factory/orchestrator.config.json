@@ -20,24 +20,30 @@
     }
   },
 
-  "_productComment": "The product's own commands -- the only place the factory touches its stack (language, package manager, test runner). Run by .factory/scripts/product.sh with the factory's key material removed from the environment. setup: install toolchain + dependencies, start services (e.g. 'docker compose up -d'), migrate; runs before every agent stage. test: the suite; its exit status is the verdict. Keep it one command with no commas (it also becomes the agents' shell permission, e.g. Bash(pytest*)). testReport: the same suite, writing a JUnit XML report to $FACTORY_JUNIT, read by `factory red` (strictRedCheck). Test cases need a file attribute: pytest -o junit_family=xunit1, jest-junit JEST_JUNIT_ADD_FILE_ATTRIBUTE=true, gotestsum --junitfile, cargo nextest's JUnit output. env: extra environment variables for every product command. See README 'Plug in your product' for per-language examples.",
+  "_productComment": "The product's own commands -- the only place the factory touches its stack (language, package manager, test runner). Run by .factory/scripts/product.sh with the factory's key material removed from the environment. setup: install toolchain + dependencies, start services (e.g. 'docker compose up -d'), migrate; runs before every agent stage. test: the suite; its exit status is the verdict. Keep it one command with no commas (it also becomes the agents' shell permission, e.g. Bash(pytest*)). testReport: the same suite, writing a JUnit XML report to $FACTORY_JUNIT, read by `factory red` (strictRedCheck). Test cases need a file attribute: pytest -o junit_family=xunit1, jest-junit JEST_JUNIT_ADD_FILE_ATTRIBUTE=true, gotestsum --junitfile, cargo nextest's JUnit output. env: extra environment variables for every product command. See README 'Plug in your product' for per-language examples. proofs: optional directory of a Lean proofs package (e.g. 'proofs'); when set, the coder must also meet its proof obligations, checked by .factory/scripts/proofs.sh -- see .factory/lean/README.md 'Proof obligations'. Its Spec/, lakefile.toml, lean-toolchain and lake-manifest.json must be in paths.protected and Impl/ in paths.coder (the defaults below do this for 'proofs').",
   "product": {
     "setup": "",
     "test": "",
     "testReport": "",
-    "env": {}
+    "env": {},
+    "proofs": ""
   },
 
-  "_pathsComment": "The factory/product boundary, decided by `factory paths` (the proved Lean gate, .factory/lean/Factory/PathGate.lean) via .factory/scripts/check-paths.sh after every agent stage and injected into each agent's prompt. Plain path prefixes, each ending in '/' (the gate refuses others). 'protected' wins over everything; any path not listed for a stage is off-limits to it, which includes the factory itself (.factory/, .github/).",
+  "_pathsComment": "The factory/product boundary, decided by `factory paths` (the proved Lean gate, .factory/lean/Factory/PathGate.lean) via .factory/scripts/check-paths.sh after every agent stage and injected into each agent's prompt. Each entry is a directory ending in '/' (covers everything under it) or an exact file path (covers that file only). 'protected' wins over everything; any path not listed for a stage is off-limits to it, which includes the factory itself (.factory/, .github/).",
   "paths": {
     "protected": [
-      "tests/golden/"
+      "tests/golden/",
+      "proofs/Spec/",
+      "proofs/lakefile.toml",
+      "proofs/lean-toolchain",
+      "proofs/lake-manifest.json"
     ],
     "qa": [
       "tests/"
     ],
     "coder": [
-      "src/"
+      "src/",
+      "proofs/Impl/"
     ]
   },
 

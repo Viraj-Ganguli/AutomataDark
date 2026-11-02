@@ -45,8 +45,8 @@ def loadScope (stage : String) : IO (Except String PathGate.Scope) := do
       { allowed := strArray (paths.getObjValD stage), protect := strArray (paths.getObjValD "protected") }
     if s.allowed.isEmpty then
       return .error s!"factory paths: no .paths.{stage} in {cfg}; refusing to allow every path"
-    match (s.allowed ++ s.protect).find? (!PathGate.validPrefix ·) with
-    | some p => return .error s!"factory paths: prefix '{p}' in {cfg} must end in '/'"
+    match (s.allowed ++ s.protect).find? (!PathGate.validEntry ·) with
+    | some p => return .error s!"factory paths: entry '{p}' in {cfg} must be a relative directory ending in '/' or an exact file path"
     | none => return .ok s
 
 def bullets (ps : List String) : String := "\n".intercalate (ps.map (s!"- `{·}`"))

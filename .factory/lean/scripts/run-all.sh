@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # run-all.sh -- build the Lean gates (which checks every proof and runs the
-# build-time tests), then check the config and plumbing around them.
+# build-time tests), audit its axioms, then check the proof-obligation gate,
+# the config, and the plumbing around them.
 # Usage: bash .factory/lean/scripts/run-all.sh   (or .factory/factory.sh verify)
 
 set -euo pipefail
@@ -12,11 +13,11 @@ BIN="$LEAN/.lake/build/bin/factory"
 
 echo "== lake build (fails on any unproved theorem or failing build-time test)"
 (cd "$LEAN" && "$LAKE" build)
-if grep -rnE '\bsorry\b|^\s*axiom\b' "$LEAN/Factory" "$LEAN/Main.lean"; then
-  echo ".factory/lean: sorry or axiom found -- every theorem must be proved" >&2
-  exit 1
-fi
 
+echo "== axiom audit: the factory's own theorems use only Lean's standard axioms"
+(cd "$LEAN" && "$LAKE" env lean --run "$ROOT/.factory/scripts/check-proofs.lean" audit Factory Factory)
+echo "== proof-obligation gate: accepts the honest example, rejects every cheat"
+bash "$LEAN/scripts/proofs.test.sh"
 echo "== rubric.json is the rubric the theorems are about"
 "$BIN" check-rubric "$ROOT/.factory/rubric.json"
 echo "== orchestrator.yml matches the Pipeline model"
