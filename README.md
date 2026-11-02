@@ -582,6 +582,27 @@ A few choices in this pipeline come from recent work on coding agents:
   small, they're where an exploit pays off (a forged rubric score, a file
   moved out of the protected harness — both real bugs found while writing
   these proofs), and every build depends on them.
+- **Fast models where execution checks the work, strong ones where nothing
+  does.** A fast "System 1" model can do as well as a slow one when every
+  answer is checked by running it. Repeated sampling from a cheaper model,
+  with unit tests picking the result, beat single samples from stronger
+  models on SWE-bench at lower cost
+  ([Large Language Monkeys, 2024](https://arxiv.org/abs/2407.21787)), and
+  cascades that move up to a bigger model only on failure are a standard
+  way to cut cost
+  ([routing and cascades survey, 2026](https://arxiv.org/abs/2603.04445)).
+  In this pipeline only the coder's output is checked by execution: tests,
+  write-scope gate, proofs. So only the coder gets a fast-first ladder.
+  QA writes those checks; a weak QA means weak tests the coder passes
+  trivially. Review has no check at all. Both stay on strong models, and
+  review on a different family (above). In a local trial on three specs
+  (recurring dates, a 4-file feature, a vague spec), QA fixed per spec and
+  graded by held-out tests the agents never saw, a Haiku coder matched an
+  Opus coder (27/27 held-out tests each) with about 20× less coder compute,
+  about a third less for the whole run. The difference that showed:
+  Haiku recorded fewer open questions, which QA on a strong model already
+  covers. It's a small sample (one or two runs per spec and model), and
+  Haiku never needed the fallback.
 - **Feed failures back.** One retry with the concrete test output in context
   (in the style of [Reflexion](https://arxiv.org/abs/2303.11366)) is a cheap
   way to recover from a near miss without a full re-run.
@@ -599,6 +620,9 @@ A few choices in this pipeline come from recent work on coding agents:
 
 - `maxTurns` only bounds `claude-code`. For `opencode` and `codex`, the
   agent step's `timeout-minutes` is the backstop.
+- A model ladder's fallback has so far run only with a stand-in agent: in
+  live trials the fast coder was green on its first attempt every time. And
+  usage is what each harness reports: Codex gives tokens but no cost.
 - `codex` and `opencode` aren't restricted per tool the way `claude-code`
   is. The path gate and `persist-credentials: false` contain them, but they
   can run arbitrary shell commands inside the runner.
