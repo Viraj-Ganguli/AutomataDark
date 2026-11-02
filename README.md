@@ -156,14 +156,20 @@ curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
 .factory/factory.sh run 12                 # or a GitHub issue number (needs gh)
 ```
 
-- **Which CLI:** the config's `harness` if it's `claude-code` or `codex`,
-  otherwise whichever is installed. Override with
-  `FACTORY_LOCAL_HARNESS=claude|codex` and `FACTORY_LOCAL_MODEL=opus` (or any
-  model your CLI accepts).
+- **Which CLI and model:** any mix of Claude Code and Codex, per stage and
+  per attempt. Each setting is `[claude:|codex:]model`, using the CLI's own
+  model names; `codex:` alone means Codex's default model. From highest
+  priority: `FACTORY_LOCAL_<STAGE>_MODELS` (e.g.
+  `FACTORY_LOCAL_REVIEW_MODELS=codex:`), `FACTORY_LOCAL_MODEL` (every
+  stage), then `localModel` in the config (per stage under `stages`, like
+  every key). With no harness named: `FACTORY_LOCAL_HARNESS`, else the
+  config's `harness` if it's `claude-code` or `codex`, else whichever is
+  installed. A cross-family reviewer is
+  `FACTORY_LOCAL_MODEL=claude:sonnet FACTORY_LOCAL_REVIEW_MODELS=codex:`.
 - **No surprise bills:** API-key variables (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, …) are removed from the agent's environment, and the run
-  refuses to start unless the CLI reports a subscription login (Claude Code:
-  `claude.ai`; Codex: ChatGPT).
+  refuses to start unless every CLI it will use reports a subscription
+  login (Claude Code: `claude.ai`; Codex: ChatGPT).
 - **Your checkout is never touched:** each run works in a new git worktree on
   branch `agent/local-<slug>-<time>`, next to your repo in
   `<repo>-agent-runs/`, starting from your last commit. Prompts, agent output,
@@ -175,19 +181,22 @@ curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
   and the exact rubric score. The rules are snapshotted before any agent
   runs, as in CI.
 - Run part of the pipeline with `FACTORY_STAGES=qa` or `FACTORY_STAGES=qa,coder`.
-- **Fast coder, strong fallback:** `FACTORY_LOCAL_CODER_MODELS=haiku,opus`
-  runs the coder's first attempt on a fast model and, only if the suite is
-  still red, the next attempt on a strong one (the last name repeats). The
-  coder is the one stage whose work is checked by execution (tests and
-  gates), so a fast model there is safe; QA writes those checks and review
-  has none, so they keep `FACTORY_LOCAL_MODEL`. Names are the CLI's own
-  (`haiku` is a Claude Code alias; Codex takes its model names).
-- **What a run used:** with Claude Code, `<worktree>.record/usage.jsonl` has
-  one line per agent session (turns, seconds, and the per-model list-price
-  cost the CLI reports; not billed on a subscription, but a fair measure of
-  quota used), and the summary prints the total. Your own
-  `~/.claude/settings.json` applies, so an `advisorModel` there lets a fast
-  coder consult that model, which shows up in `usage.jsonl`.
+- **Fast coder, strong fallback:** a list is a ladder.
+  `FACTORY_LOCAL_CODER_MODELS=claude:haiku,claude:opus` (or
+  `...,codex:gpt-5.5`) runs the coder's first attempt on a fast model and,
+  only if the suite is still red, the next on a strong one (the last entry
+  repeats). The coder is the one stage whose work is checked by execution
+  (tests and gates), so a fast model there is safe; QA writes those checks
+  and review has none, so keep them strong. CI takes the same ladder as a
+  `model` list ([Plug in any model or harness](#plug-in-any-model-or-harness)).
+- **What a run used:** `<worktree>.record/usage.jsonl` has one line per
+  agent session, in the same shape for every harness: stage, attempt,
+  harness, model, seconds, turns, tokens, and cost where the harness reports
+  it (Claude Code does, at list price, which a subscription doesn't bill but
+  is a fair measure of quota; Codex reports tokens only). The summary prints
+  the totals. Your own `~/.claude/settings.json` applies, so an
+  `advisorModel` there lets a fast Claude coder consult that model, which
+  shows up in the log.
 
 Subscription plans have usage limits rather than per-token costs; a run
 uses roughly what doing the same work interactively would.
@@ -340,7 +349,8 @@ flowchart TD
 | Key | Meaning |
 | --- | --- |
 | `harness` | `claude-code`, `opencode`, or `codex`. |
-| `model` | Any slug from [openrouter.ai/models](https://openrouter.ai/models). `~provider/…-latest` aliases (e.g. `~anthropic/claude-sonnet-latest`) always track the newest release. |
+| `model` | Any slug from [openrouter.ai/models](https://openrouter.ai/models). `~provider/…-latest` aliases (e.g. `~anthropic/claude-sonnet-latest`) always track the newest release. Or a list, a ladder: attempt *n* uses entry *n*, the last repeats, and the stage gets max(`maxAttempts`, list length) attempts. An entry can name its own harness, `"opencode:<slug>"`, so one ladder can mix harnesses and providers. |
+| `localModel` | The same, for [local subscription runs](#run-it-locally-on-your-subscription), in the CLI's own names: `"claude:haiku"`, `"codex:gpt-5.5"`, `"codex:"` (Codex's default). |
 | `maxTurns` | Turn cap per stage. Honored by `claude-code` only; the other harnesses are bounded by the step's `timeout-minutes`. |
 | `maxAttempts` | How many times a stage runs with the previous failures fed back. Used by `coder` (default `2`). |
 | `stages.<qa\|coder\|review>` | Per-stage overrides for any key above. |
@@ -372,6 +382,20 @@ model family (see [why](#design-notes-and-research)):
   "stages": {
     "coder":  { "maxTurns": 8, "maxAttempts": 2 },
     "review": { "harness": "opencode", "model": "~google/gemini-pro-latest" }
+  }
+}
+```
+
+**Example: fast coder, strong fallback.** The coder's first attempt on a
+fast model, retries on a strong one from another provider. The coder's work
+is checked by tests and gates, so a miss costs only a retry. Each session's
+turns, tokens, and cost go in the run record's `usage.jsonl` and the job
+summary:
+
+```json
+{
+  "stages": {
+    "coder": { "model": ["opencode:~google/gemini-flash-latest", "claude-code:~anthropic/claude-opus-latest"] }
   }
 }
 ```

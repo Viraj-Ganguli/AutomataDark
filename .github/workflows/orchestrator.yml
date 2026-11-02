@@ -450,7 +450,7 @@ jobs:
 
           for i in $(seq 1 "$ATTEMPTS"); do
             echo "::group::Coder attempt $i of $ATTEMPTS"
-            bash "$FACTORY_SCRIPTS"/run-agent.sh coder "$PROMPT" \
+            FACTORY_ATTEMPT=$i bash "$FACTORY_SCRIPTS"/run-agent.sh coder "$PROMPT" \
               "Read,Write,Edit,Glob,Grep,$TEST_TOOL,Bash(git status*),Bash(git diff*),Bash(git log*)" \
               || echo "Agent exited non-zero on attempt $i; checking the suite anyway."
             echo "::endgroup::"
