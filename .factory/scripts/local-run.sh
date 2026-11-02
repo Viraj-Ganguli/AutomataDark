@@ -78,6 +78,9 @@ REF="${REF:-local: $SLUG}"
 # --- worktree ----------------------------------------------------------------
 
 STAMP=$(date +%Y%m%d-%H%M%S)
+# Two runs of one spec in the same second would collide; number the later one.
+n=1; base=$STAMP
+while git show-ref -q --verify "refs/heads/agent/local-${SLUG:-issue}-$STAMP"; do n=$((n + 1)); STAMP="$base-$n"; done
 BRANCH="agent/local-${SLUG:-issue}-$STAMP"
 WT_ROOT="${FACTORY_WORKTREES:-$(dirname "$ROOT")/$(basename "$ROOT")-agent-runs}"
 WT="$WT_ROOT/${SLUG:-issue}-$STAMP"
